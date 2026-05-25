@@ -1,5 +1,7 @@
 # Finance Data Cleaning Pipeline
 
+[![Live Dashboard](https://img.shields.io/badge/Dashboard-Live-brightgreen)](https://akshay0649.github.io/finance-cleaning-pipeline/dq_dashboard.html)
+
 A production-ready Python pipeline that connects to **SQL Server / Azure SQL**, loads financial data (invoices, payments, vendors), applies **8 automated cleaning operations**, scores every record across **5 data quality dimensions**, and delivers a cleaned CSV, a scored database table, and a **visual analytics dashboard** — all driven by a single `config.csv` file.
 
 ---
@@ -37,7 +39,7 @@ python generate_sample_data.py
 python pipeline.py
 
 # 4. Open the dashboard
-start dq_dashboard.html
+**[View Live Dashboard →](https://akshay0649.github.io/finance-cleaning-pipeline/dq_dashboard.html)**
 ```
 
 Cleaned CSV → `output/invoices_cleaned.csv`
