@@ -639,30 +639,91 @@ if "scored_df" in st.session_state:
     # TAB 6 — EXPORT
     # =========================================================================
     with tab6:
-        st.subheader("Download results")
-        fname = f"finance_dq_scored_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
-
+        # Full dataset download
+        st.subheader("\u2b07\ufe0f Download full scored dataset")
+        st.caption(f"{len(df_f):,} records \u00b7 all severity levels \u00b7 includes all DQ columns")
         st.download_button(
-            label="⬇️ Download full scored dataset (CSV)",
+            label="\u2b07\ufe0f Download full scored dataset (CSV)",
             data=df_f.to_csv(index=False).encode("utf-8"),
-            file_name=fname,
+            file_name=f"finance_dq_scored_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
             mime="text/csv",
             use_container_width=True,
         )
 
         st.divider()
-        st.subheader("Filter & download by severity")
-        sev_dl = st.selectbox("Severity to export", ["ALL"] + SEV_ORDER)
-        export_df = df_f if sev_dl == "ALL" else df_f[df_f["dq_severity"] == sev_dl]
-        st.caption(f"{len(export_df)} rows will be exported")
-        st.download_button(
-            label=f"⬇️ Download {sev_dl} records",
-            data=export_df.to_csv(index=False).encode("utf-8"),
-            file_name=f"finance_dq_{sev_dl.lower()}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-            mime="text/csv",
-            use_container_width=True,
-        )
 
-# ── Footer ───────────────────────────────────────────────────────────────────
+        # Filter -> Preview -> Download
+        st.subheader("\U0001f50e Filter, preview & download by severity")
+
+        fc1, fc2 = st.columns([2, 1])
+        with fc1:
+            sev_dl = st.selectbox(
+                "Severity to preview",
+                ["ALL"] + SEV_ORDER,
+                help="Pick a severity level to inspect records before downloading",
+            )
+        with fc2:
+            preview_cols_opt = st.multiselect(
+                "Columns to show",
+                options=[
+                    "invoice_number", "vendor_name", "amount", "currency",
+                    "status", "dq_score", "dq_grade", "dq_severity",
+                    "dq_score_completeness", "dq_score_validity",
+                    "dq_score_accuracy", "dq_score_consistency",
+                    "dq_score_uniqueness", "dq_issues",
+                ],
+                default=[
+                    "invoice_number", "vendor_name", "amount", "currency",
+                    "status", "dq_score", "dq_grade", "dq_severity", "dq_issues",
+                ],
+                help="Choose which columns appear in the preview table",
+            )
+
+        export_df = df_f if sev_dl == "ALL" else df_f[df_f["dq_severity"] == sev_dl]
+
+        # Severity KPIs
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("Records", f"{len(export_df):,}")
+        m2.metric("Avg DQ Score", f"{export_df['dq_score'].mean():.1f}" if len(export_df) else "\u2014")
+        m3.metric("Grades (A/B)", int((export_df["dq_grade"].isin(["A","B"])).sum()) if len(export_df) else 0)
+        m4.metric("Grades (D/F)", int((export_df["dq_grade"].isin(["D","F"])).sum()) if len(export_df) else 0)
+
+        # Preview table
+        if len(export_df) == 0:
+            st.info("No records match the selected severity filter.")
+        else:
+            show_cols = [c for c in preview_cols_opt if c in export_df.columns]
+            if not show_cols:
+                show_cols = [c for c in ["invoice_number","vendor_name","dq_score","dq_severity"]
+                             if c in export_df.columns]
+
+            score_col_keys = [
+                "dq_score", "dq_score_completeness", "dq_score_validity",
+                "dq_score_accuracy", "dq_score_consistency", "dq_score_uniqueness",
+            ]
+            col_cfg = {
+                c: st.column_config.ProgressColumn(c, min_value=0, max_value=100, format="%d")
+                for c in score_col_keys if c in show_cols
+            }
+
+            st.dataframe(
+                export_df[show_cols].reset_index(drop=True),
+                use_container_width=True,
+                height=420,
+                column_config=col_cfg,
+            )
+            st.caption(
+                f"Showing {len(export_df):,} {sev_dl} records \u00b7 "
+                "scroll right for all columns"
+            )
+            st.download_button(
+                label=f"\u2b07\ufe0f Download {sev_dl} records ({len(export_df):,} rows)",
+                data=export_df.to_csv(index=False).encode("utf-8"),
+                file_name=f"finance_dq_{sev_dl.lower()}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                mime="text/csv",
+                use_container_width=True,
+            )
+
+# Footer
 st.divider()
-st.caption("Finance Data Quality Pipeline · 8 cleaning ops · 5-dimension DQ scoring · Built by Akshay")
+st.caption("Finance Data Quality Pipeline \u00b7 8 cleaning ops \u00b7 5-dimension DQ scoring \u00b7 Built by Akshay")
