@@ -1,28 +1,5 @@
 """
-pipeline.py
------------
-Finance Data Cleaning Pipeline — Main Orchestrator
-===================================================
-
-What it does
-------------
-1. Loads parameters from config.csv
-2. Connects to SQL Server (or SQLite in demo mode)
-3. Extracts the source table into a Pandas DataFrame
-4. Runs 8 cleaning operations via cleaner.py
-5. Exports the cleaned data to a CSV file
-6. Writes the cleaned data back to the database as a new table
-7. Appends a run summary to the pipeline audit log (CSV)
-8. Prints a human-readable summary report
-
-Quick start (demo mode — no DB credentials needed):
-    pip install -r requirements.txt
-    python generate_sample_data.py   # creates finance_demo.db with dirty data
-    python pipeline.py               # runs the full pipeline
-
-Switch to SQL Server:
-    Edit config.csv → set db_mode=sqlserver and fill in db_server, db_name, etc.
-    Then just: python pipeline.py
+pipeline.py  —  Finance Data Cleaning Pipeline
 """
 
 import csv
@@ -33,12 +10,10 @@ from datetime import datetime
 
 import pandas as pd
 
-from db_connector import get_engine, table_exists
+from db_connector import get_engine
 from cleaner import run_all_cleaners
+from scorer import score_dataframe, DIM_WEIGHTS
 
-# ---------------------------------------------------------------------------
-# Logging setup
-# ---------------------------------------------------------------------------
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s  %(levelname)-8s  %(message)s",
@@ -52,138 +27,139 @@ BANNER = """
 ╚══════════════════════════════════════════════════════════╝
 """
 
-# ---------------------------------------------------------------------------
-# Config loader
-# ---------------------------------------------------------------------------
-
-def load_config(path: str = "config.csv") -> dict:
-    """Read config.csv and return a {parameter: value} dict."""
+def load_config(path="config.csv"):
     if not os.path.exists(path):
         logger.error(f"config.csv not found at '{path}'. Aborting.")
         sys.exit(1)
     config = {}
     with open(path, newline="", encoding="utf-8") as f:
-        reader = csv.DictReader(f)
-        for row in reader:
+        for row in csv.DictReader(f):
             config[row["parameter"].strip()] = row["value"].strip()
     logger.info(f"[Config] Loaded {len(config)} parameters from '{path}'")
     return config
 
-
-# ---------------------------------------------------------------------------
-# Data extraction
-# ---------------------------------------------------------------------------
-
-def extract_data(engine, config: dict) -> pd.DataFrame:
-    """Load the source table from the database into a DataFrame."""
-    mode   = config.get("db_mode", "demo").lower()
-    table  = config["source_table"]
-
-    if mode == "demo":
-        # SQLite — no schema prefix
-        query = f"SELECT * FROM {table}"
-    else:
-        schema = config.get("source_schema", "dbo")
-        query  = f"SELECT * FROM [{schema}].[{table}]"
-
-    logger.info(f"[Extract] Running: {query}")
+def extract_data(engine, config):
+    mode  = config.get("db_mode", "demo").lower()
+    table = config["source_table"]
+    query = f"SELECT * FROM {table}" if mode == "demo" \
+            else f"SELECT * FROM [{config.get('source_schema','dbo')}].[{table}]"
+    logger.info(f"[Extract] {query}")
     df = pd.read_sql(query, engine)
     logger.info(f"[Extract] Loaded {len(df):,} rows × {len(df.columns)} columns")
     return df
 
-
-# ---------------------------------------------------------------------------
-# CSV export
-# ---------------------------------------------------------------------------
-
-def export_csv(df: pd.DataFrame, config: dict) -> str:
-    """Write cleaned DataFrame to a CSV file. Returns the output path."""
+def export_csv(df, config):
     path = config.get("export_csv_path", "output/invoices_cleaned.csv")
     os.makedirs(os.path.dirname(path) if os.path.dirname(path) else ".", exist_ok=True)
     df.to_csv(path, index=False, encoding="utf-8")
-    logger.info(f"[Export] CSV written → {path}  ({len(df):,} rows)")
+    logger.info(f"[Export] CSV → {path}  ({len(df):,} rows)")
     return path
 
-
-# ---------------------------------------------------------------------------
-# DB write-back
-# ---------------------------------------------------------------------------
-
-def write_to_db(df: pd.DataFrame, engine, config: dict) -> None:
-    """Write the cleaned DataFrame to the cleaned_table in the database."""
-    mode          = config.get("db_mode", "demo").lower()
-    cleaned_table = config.get("cleaned_table", "invoices_cleaned")
-    cleaned_schema = config.get("cleaned_schema", "dbo")
-
+def write_to_db(df, engine, config):
+    mode  = config.get("db_mode", "demo").lower()
+    table = config.get("cleaned_table", "invoices_cleaned")
+    schema = config.get("cleaned_schema", "dbo")
     if mode == "demo":
-        # SQLite — schema not supported
-        df.to_sql(cleaned_table, engine, if_exists="replace", index=False)
-        logger.info(f"[Write-back] Table '{cleaned_table}' written to SQLite demo DB")
+        df.to_sql(table, engine, if_exists="replace", index=False)
     else:
-        df.to_sql(
-            cleaned_table,
-            engine,
-            schema=cleaned_schema,
-            if_exists="replace",
-            index=False,
-            chunksize=500,
-        )
-        logger.info(f"[Write-back] Table '[{cleaned_schema}].[{cleaned_table}]' written to SQL Server")
+        df.to_sql(table, engine, schema=schema, if_exists="replace", index=False, chunksize=500)
+    logger.info(f"[Write-back] '{table}' written to DB")
 
-
-# ---------------------------------------------------------------------------
-# Audit log
-# ---------------------------------------------------------------------------
-
-def append_run_log(config: dict, stats: dict, rows_in: int, rows_out: int) -> None:
-    """Append one row to the pipeline run log CSV."""
-    log_path = config.get("log_csv_path", "output/pipeline_run_log.csv")
-    os.makedirs(os.path.dirname(log_path) if os.path.dirname(log_path) else ".", exist_ok=True)
-
-    run_record = {
-        "run_timestamp":        datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "source_table":         config.get("source_table"),
-        "cleaned_table":        config.get("cleaned_table"),
-        "rows_input":           rows_in,
-        "rows_output":          rows_out,
-        **stats,
+def append_run_log(config, clean_stats, score_stats, rows_in, rows_out):
+    path = config.get("log_csv_path", "output/pipeline_run_log.csv")
+    os.makedirs(os.path.dirname(path) if os.path.dirname(path) else ".", exist_ok=True)
+    record = {
+        "run_timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "source_table":  config.get("source_table"),
+        "cleaned_table": config.get("cleaned_table"),
+        "rows_input":    rows_in,
+        "rows_output":   rows_out,
+        **clean_stats, **score_stats,
     }
-
-    file_exists = os.path.exists(log_path)
-    with open(log_path, "a", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=run_record.keys())
-        if not file_exists:
-            writer.writeheader()
-        writer.writerow(run_record)
-    logger.info(f"[Audit] Run logged → {log_path}")
-
+    exists = os.path.exists(path)
+    with open(path, "a", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=record.keys())
+        if not exists:
+            w.writeheader()
+        w.writerow(record)
+    logger.info(f"[Audit] Run logged → {path}")
 
 # ---------------------------------------------------------------------------
 # Summary report
 # ---------------------------------------------------------------------------
+SEV_COLORS = {"CLEAN": "✅", "LOW": "🟡", "MEDIUM": "🟠", "HIGH": "🔴", "CRITICAL": "🚨"}
 
-def print_summary(stats: dict, rows_in: int, rows_out: int, csv_path: str) -> None:
-    width = 60
-    print("\n" + "═" * width)
-    print("  PIPELINE SUMMARY REPORT")
-    print("═" * width)
-    print(f"  {'Rows loaded (raw):':<35} {rows_in:>8,}")
-    print(f"  {'Rows output (cleaned):':<35} {rows_out:>8,}")
-    print(f"  {'Rows removed (duplicates):':<35} {stats.get('duplicates_removed', 0):>8,}")
-    print("─" * width)
-    print(f"  {'Null cells filled:':<35} {stats.get('nulls_filled', 0):>8,}")
-    print(f"  {'Rows that had nulls:':<35} {stats.get('rows_with_nulls', 0):>8,}")
-    print(f"  {'Date parse errors:':<35} {stats.get('date_parse_errors', 0):>8,}")
-    print(f"  {'Negative amount flags:':<35} {stats.get('amount_negative_flags', 0):>8,}")
-    print(f"  {'Above-max amount flags:':<35} {stats.get('amount_above_max_flags', 0):>8,}")
-    print(f"  {'Invalid currency codes fixed:':<35} {stats.get('currency_invalid', 0):>8,}")
-    print(f"  {'Vendor names normalized:':<35} {stats.get('vendor_names_normalized', 0):>8,}")
-    print(f"  {'Invalid statuses corrected:':<35} {stats.get('status_invalid', 0):>8,}")
-    print(f"  {'Outliers flagged:':<35} {stats.get('outliers_flagged', 0):>8,}")
-    print("─" * width)
-    print(f"  CSV output  →  {csv_path}")
-    print("═" * width + "\n")
+def _bar(score: float, width: int = 18) -> str:
+    filled = round((score / 100) * width)
+    return "█" * filled + "░" * (width - filled)
 
+def print_summary(clean_stats, score_stats, rows_in, rows_out, csv_path):
+    W = 68
+    print("\n" + "═" * W)
+    print("  PIPELINE SUMMARY")
+    print("═" * W)
+    print(f"  {'Rows loaded (raw):':<40} {rows_in:>6,}")
+    print(f"  {'Rows output (cleaned):':<40} {rows_out:>6,}")
+    print(f"  {'Duplicates removed:':<40} {clean_stats.get('duplicates_removed',0):>6,}")
+    print("─" * W)
+    print(f"  {'Null cells filled:':<40} {clean_stats.get('nulls_filled',0):>6,}")
+    print(f"  {'Date parse errors:':<40} {clean_stats.get('date_parse_errors',0):>6,}")
+    print(f"  {'Negative amount flags:':<40} {clean_stats.get('amount_negative_flags',0):>6,}")
+    print(f"  {'Above-max amount flags:':<40} {clean_stats.get('amount_above_max_flags',0):>6,}")
+    print(f"  {'Invalid currency codes fixed:':<40} {clean_stats.get('currency_invalid',0):>6,}")
+    print(f"  {'Invalid statuses corrected:':<40} {clean_stats.get('status_invalid',0):>6,}")
+    print(f"  {'Outliers flagged:':<40} {clean_stats.get('outliers_flagged',0):>6,}")
+
+    print("\n" + "═" * W)
+    print("  DATA QUALITY SCORES  (weighted composite)")
+    print("─" * W)
+    overall = score_stats.get("dq_mean_score", 0)
+    print(f"  Overall DQ Score   {_bar(overall)}  {overall:>5.1f} / 100")
+    print()
+
+    dims = [
+        ("Completeness", "dq_avg_completeness", 20,
+         "Required fields present"),
+        ("Validity",     "dq_avg_validity",     25,
+         "Values conform to business rules"),
+        ("Accuracy",     "dq_avg_accuracy",     35,
+         "Mathematically & financially correct"),
+        ("Consistency",  "dq_avg_consistency",  15,
+         "Cross-field logic is coherent"),
+        ("Uniqueness",   "dq_avg_uniqueness",    5,
+         "No duplicate invoice numbers"),
+    ]
+    print(f"  {'Dimension':<14} {'Wt':>3}  {'Score':>5}  {'Bar':<20}  What it measures")
+    print(f"  {'─'*13} {'─'*3}  {'─'*5}  {'─'*20}  {'─'*28}")
+    for name, key, wt, desc in dims:
+        s = score_stats.get(key, 0)
+        print(f"  {name:<14} {wt:>2}%  {s:>5.1f}  {_bar(s):<20}  {desc}")
+
+    print("\n" + "─" * W)
+    print("  Severity Breakdown:")
+    total = rows_out
+    for sev, key in [("CLEAN",    "dq_sev_clean"),
+                     ("LOW",      "dq_sev_low"),
+                     ("MEDIUM",   "dq_sev_medium"),
+                     ("HIGH",     "dq_sev_high"),
+                     ("CRITICAL", "dq_sev_critical")]:
+        n   = score_stats.get(key, 0)
+        pct = f"{n/total*100:.1f}%" if total else "0%"
+        icon = SEV_COLORS.get(sev, "")
+        bar  = _bar(n / total * 100) if total else _bar(0)
+        print(f"  {icon} {sev:<10}  {bar}  {n:>4} rows ({pct})")
+
+    print("\n" + "─" * W)
+    print(f"  Grade   A:{score_stats.get('dq_grade_A',0):>4}  "
+          f"B:{score_stats.get('dq_grade_B',0):>4}  "
+          f"C:{score_stats.get('dq_grade_C',0):>4}  "
+          f"D:{score_stats.get('dq_grade_D',0):>4}  "
+          f"F:{score_stats.get('dq_grade_F',0):>4}")
+    print(f"  Lowest single score: {score_stats.get('dq_min_score','?')}  |  "
+          f"Perfect rows: {score_stats.get('dq_perfect_rows',0)}")
+    print("─" * W)
+    print(f"  CSV → {csv_path}")
+    print("═" * W + "\n")
 
 # ---------------------------------------------------------------------------
 # Main
@@ -193,35 +169,25 @@ def main():
     print(BANNER)
     start = datetime.now()
 
-    # 1. Load config
-    config = load_config("config.csv")
-
-    # 2. Connect to database
-    engine = get_engine(config)
-
-    # 3. Extract source data
-    df_raw = extract_data(engine, config)
+    config  = load_config("config.csv")
+    engine  = get_engine(config)
+    df_raw  = extract_data(engine, config)
     rows_in = len(df_raw)
 
-    # 4. Run all cleaning operations
-    logger.info("[Clean] Starting cleaning operations...")
-    df_clean, stats = run_all_cleaners(df_raw, config)
-    rows_out = len(df_clean)
+    logger.info("[Clean] Running 8 cleaning operations...")
+    df_clean, clean_stats = run_all_cleaners(df_raw, config)
 
-    # 5. Export to CSV
-    csv_path = export_csv(df_clean, config)
+    logger.info("[Score] Computing 5-dimension DQ scores...")
+    df_scored, score_stats = score_dataframe(df_clean)
+    rows_out = len(df_scored)
 
-    # 6. Write cleaned table back to DB
-    write_to_db(df_clean, engine, config)
+    csv_path = export_csv(df_scored, config)
+    write_to_db(df_scored, engine, config)
+    append_run_log(config, clean_stats, score_stats, rows_in, rows_out)
 
-    # 7. Append to audit log
-    append_run_log(config, stats, rows_in, rows_out)
-
-    # 8. Print summary
     elapsed = (datetime.now() - start).total_seconds()
-    print_summary(stats, rows_in, rows_out, csv_path)
-    logger.info(f"[Done] Pipeline completed in {elapsed:.2f}s")
-
+    print_summary(clean_stats, score_stats, rows_in, rows_out, csv_path)
+    logger.info(f"[Done] Completed in {elapsed:.2f}s")
 
 if __name__ == "__main__":
     main()
