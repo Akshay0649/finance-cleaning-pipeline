@@ -1,17 +1,22 @@
 """
-app.py — Finance Data Quality Streamlit Application
-====================================================
-Merged version:
-  - Upload your own CSV  OR  generate synthetic demo data
-  - Editable pipeline config in sidebar
-  - Explicit Run Pipeline button
-  - Tabbed results: Dashboard · Dimension Analysis · Record Explorer · Deep Dive · Stats · Export
-  - Self-contained: no external file imports needed (works on Streamlit Cloud)
+app.py — Finance Data Quality Pipeline  v2.1
+=============================================
+Universal AI-powered DQ platform.
+Works with ANY dataset — no domain selection needed.
+Auto-detects column types and applies the right checks automatically.
+
+New in v2.1:
+  - Auto column-type detection (numeric · date · categorical · id · text · boolean)
+  - Universal statistical profiler (per-column health stats)
+  - Smart column-role mapper (dates, amounts, IDs detected automatically)
+  - Profile tab: null heatmap, type breakdown, sample values, distribution stats
+  - Cleaning & scoring now fully dynamic — no hardcoded column names
 
 Run locally:  streamlit run app.py
 Deploy:       push to GitHub → share.streamlit.io
 """
 
+import json
 import random
 from collections import Counter
 from datetime import date, datetime, timedelta
@@ -22,26 +27,35 @@ import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 
-# ── Page config ──────────────────────────────────────────────────────────────
+# ── Page config ───────────────────────────────────────────────────────────────
 st.set_page_config(
-    page_title="Finance DQ Pipeline",
-    page_icon="📊",
+    page_title="DataQual AI",
+    page_icon="🔬",
     layout="wide",
     initial_sidebar_state="expanded",
 )
 
-# ── Constants ────────────────────────────────────────────────────────────────
+# ── Column-type metadata ──────────────────────────────────────────────────────
+COL_TYPE_META = {
+    "numeric":     {"icon": "🔢", "label": "Numeric",     "color": "#378ADD"},
+    "date":        {"icon": "📅", "label": "Date",        "color": "#1D9E75"},
+    "categorical": {"icon": "🏷️",  "label": "Categorical", "color": "#E24B4A"},
+    "id":          {"icon": "🆔", "label": "ID / Key",    "color": "#534AB7"},
+    "text":        {"icon": "📝", "label": "Free text",   "color": "#BA7517"},
+    "boolean":     {"icon": "☑️",  "label": "Boolean",    "color": "#639922"},
+}
+
+# ── Severity / grade constants ────────────────────────────────────────────────
 SEV_ORDER  = ["CLEAN", "LOW", "MEDIUM", "HIGH", "CRITICAL"]
 SEV_COLORS = {"CLEAN": "#639922", "LOW": "#EF9F27",
               "MEDIUM": "#BA7517", "HIGH": "#D85A30", "CRITICAL": "#E24B4A"}
 DIM_COLORS = {
-    "Completeness": "#378ADD", "Validity": "#E24B4A",
+    "Completeness": "#378ADD", "Validity":    "#E24B4A",
     "Accuracy":     "#3B6D11", "Consistency": "#1D9E75", "Uniqueness": "#534AB7",
 }
-PLACEHOLDER_VALUES = {"UNKNOWN", "N/A", "NA", "NONE", ""}
-CRITICAL_FIELDS    = ["vendor_name", "invoice_number", "amount",
-                      "total_amount", "currency", "status"]
+PLACEHOLDER_VALUES = {"UNKNOWN", "N/A", "NA", "NONE", "", "NULL", "NAN", "-"}
 
+# kept for demo generator only
 VENDORS    = ["Accenture Ltd","  KPMG Advisory  ","Deloitte & Touche","ernst & young",
               "PwC Services","GARTNER INC","Infosys BPO","Wipro Technologies",
               "IBM Global  ","Capgemini SE","  Oracle Corp","SAP AG",
@@ -50,58 +64,53 @@ CURRENCIES = ["USD","EUR","GBP","AUD","INR","XYZ","ZZZ","usd","Eur",None]
 STATUSES   = ["PAID","PENDING","OVERDUE","CANCELLED","DRAFT",
               "paid","  Pending  ","overdue","settled","VOID",None,""]
 
-# ────────────────────────────────────────────────────────────────────────────
-# SIDEBAR — Config
-# ────────────────────────────────────────────────────────────────────────────
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SIDEBAR
+# ═══════════════════════════════════════════════════════════════════════════════
 with st.sidebar:
     st.header("⚙️ Pipeline Configuration")
-    st.caption("Adjust thresholds — applied when you run the pipeline")
+    st.caption("Thresholds applied when you run the pipeline")
 
-    null_fill_str  = st.text_input("Null fill (text fields)", "UNKNOWN")
-    null_fill_num  = st.number_input("Null fill (numeric fields)", value=0.0)
-    min_amount     = st.number_input("Min valid amount", value=0.0)
-    max_amount     = st.number_input("Max valid amount", value=10_000_000.0, step=100_000.0)
-    outlier_z      = st.number_input("Outlier Z-score threshold", value=3.0, step=0.5)
-    valid_curr     = st.text_input("Valid currencies (;-separated)", "USD;EUR;GBP;AUD;CAD;INR;SGD")
-    valid_stat     = st.text_input("Valid statuses (;-separated)", "PAID;PENDING;OVERDUE;CANCELLED;DRAFT")
-    dup_cols       = st.text_input("Duplicate key columns (;-separated)", "vendor_name;invoice_number")
+    null_fill_str = st.text_input("Null fill (text fields)", "UNKNOWN")
+    null_fill_num = st.number_input("Null fill (numeric fields)", value=0.0)
+    min_amount    = st.number_input("Min valid amount (numeric cols)", value=0.0)
+    max_amount    = st.number_input("Max valid amount (numeric cols)", value=10_000_000.0, step=100_000.0)
+    outlier_z     = st.number_input("Outlier Z-score threshold", value=3.0, step=0.5)
+    dup_cols      = st.text_input("Duplicate key columns (;-separated, blank = all)", "")
 
     st.divider()
-    st.caption("Built by Akshay — Data Engineer")
+    st.caption("Built by Akshay — Data Engineer · v2.1")
 
 CONFIG = {
-    "null_fill_string":           null_fill_str,
-    "null_fill_numeric":          str(null_fill_num),
-    "duplicate_subset":           dup_cols,
-    "date_columns":               "invoice_date;due_date;payment_date",
-    "amount_columns":             "amount;tax_amount;total_amount",
-    "valid_currencies":           valid_curr,
-    "valid_statuses":             valid_stat,
-    "outlier_zscore_threshold":   str(outlier_z),
-    "min_amount":                 str(min_amount),
-    "max_amount":                 str(max_amount),
+    "null_fill_string":         null_fill_str,
+    "null_fill_numeric":        null_fill_num,
+    "min_amount":               min_amount,
+    "max_amount":               max_amount,
+    "outlier_zscore_threshold": outlier_z,
+    "duplicate_subset":         dup_cols,
 }
 
-# ────────────────────────────────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
 # DEMO DATA GENERATOR
-# ────────────────────────────────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
 def _rnd_date(start, end):
     d   = start + timedelta(days=random.randint(0, (end - start).days))
-    fmt = random.choice(["%Y-%m-%d"]*5 + ["%d/%m/%Y","%m-%d-%Y","bad-date",""])
+    fmt = random.choice(["%Y-%m-%d"]*5 + ["%d/%m/%Y", "%m-%d-%Y", "bad-date", ""])
     return None if fmt == "" else d.strftime(fmt)
 
 @st.cache_data(show_spinner=False)
 def generate_demo(n: int = 300, seed: int = 42) -> pd.DataFrame:
     random.seed(seed); np.random.seed(seed)
-    s, e = date(2023,1,1), date(2025,12,31)
+    s, e = date(2023, 1, 1), date(2025, 12, 31)
     rows = []
-    for i in range(1, n+1):
+    for i in range(1, n + 1):
         vendor = random.choice(VENDORS)
         inv    = f"INV-{random.randint(1000,9999)}"
         amt    = round(random.uniform(-500, 250_000), 2)
-        if random.random() < 0.05: amt = round(random.uniform(1_000_000,15_000_000), 2)
+        if random.random() < 0.05: amt = round(random.uniform(1_000_000, 15_000_000), 2)
         if random.random() < 0.08: amt = -abs(amt)
-        tax   = round(amt * random.uniform(0.05,0.18), 2) if amt > 0 else None
+        tax   = round(amt * random.uniform(0.05, 0.18), 2) if amt > 0 else None
         total = round(amt + (tax or 0), 2)
         rows.append({
             "invoice_id":     i,
@@ -115,302 +124,586 @@ def generate_demo(n: int = 300, seed: int = 42) -> pd.DataFrame:
             "total_amount":   total if random.random() > 0.05 else None,
             "currency":       random.choice(CURRENCIES),
             "status":         random.choice(STATUSES),
-            "department":     random.choice(["Finance","IT","HR","Ops",None]),
-            "cost_centre":    random.choice(["CC100","CC200","CC300","CC999",None]),
+            "department":     random.choice(["Finance", "IT", "HR", "Ops", None]),
+            "cost_centre":    random.choice(["CC100", "CC200", "CC300", "CC999", None]),
         })
-    df = pd.DataFrame(rows)
+    df    = pd.DataFrame(rows)
     dupes = df.sample(20, random_state=7).copy()
-    df = pd.concat([df, dupes], ignore_index=True).sample(frac=1, random_state=42).reset_index(drop=True)
-    df["invoice_id"] = range(1, len(df)+1)
+    df    = pd.concat([df, dupes], ignore_index=True).sample(frac=1, random_state=42).reset_index(drop=True)
+    df["invoice_id"] = range(1, len(df) + 1)
     return df
 
-# ────────────────────────────────────────────────────────────────────────────
-# CLEANING ENGINE
-# ────────────────────────────────────────────────────────────────────────────
-def _plist(key): return [v.strip() for v in CONFIG[key].split(";") if v.strip()]
 
-def run_cleaning(df: pd.DataFrame) -> tuple:
-    fs, fn = CONFIG["null_fill_string"], float(CONFIG["null_fill_numeric"])
+# ═══════════════════════════════════════════════════════════════════════════════
+# UNIVERSAL COLUMN-TYPE DETECTOR  (v2.1 NEW)
+# ═══════════════════════════════════════════════════════════════════════════════
+@st.cache_data(show_spinner=False)
+def detect_col_types(df: pd.DataFrame) -> dict:
+    """
+    Auto-detect semantic type for every column.
+    Returns {col_name: 'numeric'|'date'|'categorical'|'id'|'text'|'boolean'}
+    No domain knowledge required — works purely from data shape.
+    """
+    types = {}
+    n = max(len(df), 1)
+
+    for col in df.columns:
+        s = df[col]
+
+        # Already a datetime dtype
+        if pd.api.types.is_datetime64_any_dtype(s):
+            types[col] = "date"; continue
+
+        # Numeric dtype
+        if pd.api.types.is_numeric_dtype(s):
+            if s.nunique() <= 2 and set(s.dropna().unique()).issubset({0, 1}):
+                types[col] = "boolean"
+            elif s.nunique() / n > 0.90 and pd.api.types.is_integer_dtype(s):
+                types[col] = "id"
+            else:
+                types[col] = "numeric"
+            continue
+
+        # Object / string columns
+        sample = s.dropna().head(200).astype(str)
+        if len(sample) == 0:
+            types[col] = "text"; continue
+
+        # Boolean-like strings
+        uniq_lower = {v.lower().strip() for v in sample.unique()}
+        if uniq_lower.issubset({"true","false","yes","no","1","0","y","n","t","f"}):
+            types[col] = "boolean"; continue
+
+        # Date strings — try parsing a sample
+        try:
+            parsed = pd.to_datetime(sample, errors="coerce")
+            if parsed.notna().mean() > 0.70:
+                types[col] = "date"; continue
+        except Exception:
+            pass
+
+        # Cardinality-based split
+        nunique      = s.nunique()
+        unique_ratio = nunique / n
+        avg_len      = sample.str.len().mean()
+
+        if unique_ratio > 0.85 and avg_len < 40:
+            types[col] = "id"
+        elif nunique <= max(30, n * 0.05):
+            types[col] = "categorical"
+        elif avg_len > 60:
+            types[col] = "text"
+        else:
+            types[col] = "categorical"
+
+    return types
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SMART COLUMN-ROLE MAPPER  (v2.1 NEW)
+# ═══════════════════════════════════════════════════════════════════════════════
+def map_columns_to_roles(df: pd.DataFrame, detected_types: dict) -> dict:
+    """
+    Maps columns to pipeline roles based purely on detected type.
+    No domain knowledge needed.
+    Returns:
+      {
+        'date_columns':        [...],
+        'numeric_columns':     [...],
+        'id_columns':          [...],
+        'categorical_columns': [...],
+        'text_columns':        [...],
+        'critical_fields':     [...],   # highest-importance cols for completeness
+      }
+    """
+    mapping = {
+        "date_columns":        [],
+        "numeric_columns":     [],
+        "id_columns":          [],
+        "categorical_columns": [],
+        "text_columns":        [],
+        "boolean_columns":     [],
+    }
+    for col, dtype in detected_types.items():
+        if   dtype == "date":        mapping["date_columns"].append(col)
+        elif dtype == "numeric":     mapping["numeric_columns"].append(col)
+        elif dtype == "id":          mapping["id_columns"].append(col)
+        elif dtype == "categorical": mapping["categorical_columns"].append(col)
+        elif dtype == "text":        mapping["text_columns"].append(col)
+        elif dtype == "boolean":     mapping["boolean_columns"].append(col)
+
+    # Critical fields = IDs + first 3 numerics + first 3 categoricals
+    mapping["critical_fields"] = (
+        mapping["id_columns"][:3]
+        + mapping["numeric_columns"][:3]
+        + mapping["categorical_columns"][:3]
+    )
+    return mapping
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# STATISTICAL PROFILER  (v2.1 NEW)
+# ═══════════════════════════════════════════════════════════════════════════════
+@st.cache_data(show_spinner=False)
+def profile_dataframe(df: pd.DataFrame, types_json: str) -> list:
+    """
+    Per-column statistical profile.
+    types_json: JSON-serialised detected_types dict (for cache key).
+    """
+    detected_types = json.loads(types_json)
+    n = max(len(df), 1)
+    profiles = []
+
+    for col in df.columns:
+        s     = df[col]
+        dtype = detected_types.get(col, "text")
+        null_count = int(s.isna().sum())
+        nunique    = int(s.nunique())
+
+        p = {
+            "column":       col,
+            "type":         dtype,
+            "null_pct":     round(null_count / n * 100, 1),
+            "null_count":   null_count,
+            "unique_count": nunique,
+            "unique_pct":   round(nunique / n * 100, 1),
+            "sample":       " · ".join(str(v) for v in s.dropna().unique()[:4]),
+            # numeric extras (filled below if applicable)
+            "min": None, "max": None, "mean": None,
+            "zero_pct": None, "neg_pct": None,
+        }
+
+        if dtype in ("numeric", "id") or pd.api.types.is_numeric_dtype(s):
+            num = pd.to_numeric(s, errors="coerce")
+            if num.notna().any():
+                p["min"]      = round(float(num.min()), 2)
+                p["max"]      = round(float(num.max()), 2)
+                p["mean"]     = round(float(num.mean()), 2)
+                p["zero_pct"] = round(float((num == 0).mean() * 100), 1)
+                p["neg_pct"]  = round(float((num < 0).mean() * 100), 1)
+
+        profiles.append(p)
+
+    return profiles
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# UNIVERSAL CLEANING ENGINE  (v2.1 — fully dynamic, no hardcoded column names)
+# ═══════════════════════════════════════════════════════════════════════════════
+def run_cleaning(df: pd.DataFrame, col_mapping: dict) -> tuple:
+    fs  = CONFIG["null_fill_string"]
+    fn  = float(CONFIG["null_fill_numeric"])
+    mn  = float(CONFIG["min_amount"])
+    mx  = float(CONFIG["max_amount"])
+    thr = float(CONFIG["outlier_zscore_threshold"])
+    dup_raw = CONFIG["duplicate_subset"].strip()
+
     df = df.copy()
+
+    # ── 1. Track rows that had nulls ──────────────────────────────────────────
     df["had_nulls"] = df.isnull().any(axis=1).astype(int)
     nulls_before = int(df.isnull().sum().sum())
+
+    # ── 2. Fill nulls by type ─────────────────────────────────────────────────
     for col in df.columns:
         if col == "had_nulls": continue
-        if df[col].dtype == object:              df[col] = df[col].fillna(fs)
-        elif pd.api.types.is_numeric_dtype(df[col]): df[col] = df[col].fillna(fn)
+        if df[col].dtype == object:
+            df[col] = df[col].fillna(fs)
+        elif pd.api.types.is_numeric_dtype(df[col]):
+            df[col] = df[col].fillna(fn)
     nulls_filled = nulls_before - int(df.isnull().sum().sum())
 
-    subset = [c for c in _plist("duplicate_subset") if c in df.columns]
-    rows_before = len(df)
-    df = df.drop_duplicates(subset=subset or None, keep="first").reset_index(drop=True)
+    # ── 3. Deduplication ─────────────────────────────────────────────────────
+    if dup_raw:
+        subset = [c.strip() for c in dup_raw.split(";") if c.strip() in df.columns]
+    else:
+        subset = col_mapping.get("id_columns", []) or None
+    rows_before   = len(df)
+    df            = df.drop_duplicates(subset=subset, keep="first").reset_index(drop=True)
     dupes_removed = rows_before - len(df)
 
+    # ── 4. Date normalization — all detected date columns ─────────────────────
     date_errors = 0
-    for col in [c for c in _plist("date_columns") if c in df.columns]:
+    for col in col_mapping.get("date_columns", []):
+        if col not in df.columns: continue
         orig   = df[col].copy()
         parsed = pd.to_datetime(df[col], errors="coerce")
-        err    = parsed.isna() & orig.notna() & (~orig.astype(str).isin(["", fs]))
+        err    = parsed.isna() & orig.notna() & (~orig.astype(str).isin(["", fs, "nan", "None"]))
         df[f"{col}_parse_error"] = err.astype(int)
         date_errors += int(err.sum())
         df[col] = parsed.dt.strftime("%Y-%m-%d").where(~parsed.isna(), other=fs)
 
-    mn, mx = float(CONFIG["min_amount"]), float(CONFIG["max_amount"])
+    # ── 5. Numeric validation — all detected numeric columns ──────────────────
     neg_flags = 0
-    for col in [c for c in _plist("amount_columns") if c in df.columns]:
-        df[col] = pd.to_numeric(df[col], errors="coerce")
+    for col in col_mapping.get("numeric_columns", []):
+        if col not in df.columns: continue
+        df[col] = pd.to_numeric(df[col], errors="coerce").fillna(fn)
         df[f"{col}_negative"]  = (df[col] < 0).astype(int)
         df[f"{col}_below_min"] = (df[col] < mn).astype(int)
         df[f"{col}_above_max"] = (df[col] > mx).astype(int)
         neg_flags += int((df[col] < 0).sum())
 
-    curr_invalid = 0
-    if "currency" in df.columns:
-        df["currency"] = df["currency"].astype(str).str.strip().str.upper()
-        inv = ~df["currency"].isin(set(_plist("valid_currencies")))
-        df["currency_invalid"] = inv.astype(int)
-        df.loc[inv, "currency"] = fs
-        curr_invalid = int(inv.sum())
+    # ── 6. Categorical standardisation ────────────────────────────────────────
+    cat_fixed = 0
+    for col in col_mapping.get("categorical_columns", []):
+        if col not in df.columns: continue
+        before = df[col].astype(str).copy()
+        df[col] = (df[col].astype(str).str.strip()
+                          .str.upper()
+                          .replace({"NAN": fs, "NONE": fs, "": fs, "NULL": fs}))
+        cat_fixed += int((df[col] != before).sum())
 
-    vendor_fixed = 0
-    if "vendor_name" in df.columns:
-        orig_v = df["vendor_name"].astype(str).copy()
-        df["vendor_name"] = (df["vendor_name"].astype(str).str.strip()
-                              .str.replace(r"\s+", " ", regex=True).str.title())
-        ph = df["vendor_name"].str.lower().isin({v.lower() for v in PLACEHOLDER_VALUES})
-        df.loc[ph, "vendor_name"] = fs
-        vendor_fixed = int((df["vendor_name"] != orig_v).sum())
+    # ── 7. ID / text columns — strip whitespace, fill placeholders ────────────
+    for col in col_mapping.get("id_columns", []) + col_mapping.get("text_columns", []):
+        if col not in df.columns: continue
+        df[col] = df[col].astype(str).str.strip()
+        ph = df[col].str.upper().isin(PLACEHOLDER_VALUES)
+        df.loc[ph, col] = fs
 
-    stat_invalid = 0
-    if "status" in df.columns:
-        df["status"] = df["status"].astype(str).str.strip().str.upper().replace({"": fs,"NAN": fs})
-        inv_s = ~df["status"].isin(set(_plist("valid_statuses")))
-        df["status_invalid"] = inv_s.astype(int)
-        df.loc[inv_s, "status"] = fs
-        stat_invalid = int(inv_s.sum())
-
-    thr = float(CONFIG["outlier_zscore_threshold"])
+    # ── 8. Outlier flagging — all numeric columns ─────────────────────────────
     outliers = 0
-    for col in [c for c in _plist("amount_columns") if c in df.columns]:
+    for col in col_mapping.get("numeric_columns", []):
+        if col not in df.columns: continue
         num = pd.to_numeric(df[col], errors="coerce")
         std = num.std()
-        z   = (num - num.mean())/std if std and std > 0 else pd.Series(0.0, index=df.index)
+        z   = (num - num.mean()) / std if std and std > 0 else pd.Series(0.0, index=df.index)
         df[f"{col}_outlier"] = (z.abs() > thr).astype(int)
         outliers += int((z.abs() > thr).sum())
 
     stats = {
-        "rows_input":           rows_before,
-        "rows_output":          len(df),
-        "duplicates_removed":   dupes_removed,
-        "nulls_filled":         nulls_filled,
-        "rows_with_nulls":      int(df["had_nulls"].sum()),
-        "date_parse_errors":    date_errors,
-        "negative_amount_flags":neg_flags,
-        "currency_invalid":     curr_invalid,
-        "vendor_names_fixed":   vendor_fixed,
-        "statuses_fixed":       stat_invalid,
-        "outliers_flagged":     outliers,
+        "rows_input":            rows_before,
+        "rows_output":           len(df),
+        "duplicates_removed":    dupes_removed,
+        "nulls_filled":          nulls_filled,
+        "rows_with_nulls":       int(df["had_nulls"].sum()),
+        "date_parse_errors":     date_errors,
+        "negative_amount_flags": neg_flags,
+        "categorical_fixed":     cat_fixed,
+        "outliers_flagged":      outliers,
+        "date_cols_processed":   len(col_mapping.get("date_columns", [])),
+        "numeric_cols_processed":len(col_mapping.get("numeric_columns", [])),
+        "cat_cols_processed":    len(col_mapping.get("categorical_columns", [])),
     }
     return df, stats
 
-# ────────────────────────────────────────────────────────────────────────────
-# SCORING ENGINE
-# ────────────────────────────────────────────────────────────────────────────
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# UNIVERSAL SCORING ENGINE  (v2.1 — fully dynamic)
+# ═══════════════════════════════════════════════════════════════════════════════
 def _clamp(s): return s.clip(0, 100)
 
-def run_scoring(df: pd.DataFrame) -> tuple:
-    df = df.copy()
+def run_scoring(df: pd.DataFrame, col_mapping: dict) -> tuple:
+    df  = df.copy()
+    n   = len(df)
+    fs  = CONFIG["null_fill_string"]
 
-    pf  = [f for f in CRITICAL_FIELDS if f in df.columns]
-    ppf = 100.0 / len(pf) if pf else 0
-    sc  = pd.Series(100.0, index=df.index)
-    for f in pf:
-        sc -= (df[f].isna() | df[f].astype(str).str.strip().str.upper()
-               .isin(PLACEHOLDER_VALUES)).astype(float) * ppf
+    critical = col_mapping.get("critical_fields", [f for f in df.columns[:6]])
+    num_cols = col_mapping.get("numeric_columns", [])
+    id_cols  = col_mapping.get("id_columns", [])
+    cat_cols = col_mapping.get("categorical_columns", [])
+    date_cols= col_mapping.get("date_columns", [])
+
+    # ── COMPLETENESS (20%) ────────────────────────────────────────────────────
+    sc = pd.Series(100.0, index=df.index)
+    if critical:
+        ppf = 100.0 / len(critical)
+        for f in critical:
+            if f not in df.columns: continue
+            sc -= (df[f].isna() | df[f].astype(str).str.strip().str.upper()
+                   .isin(PLACEHOLDER_VALUES)).astype(float) * ppf
     df["dq_score_completeness"] = _clamp(sc).round(1)
 
+    # ── VALIDITY (25%) ────────────────────────────────────────────────────────
     sv = pd.Series(100.0, index=df.index)
-    for col, pen in [("currency_invalid",60),("status_invalid",50),
-                     ("invoice_date_parse_error",30),("due_date_parse_error",25),
-                     ("payment_date_parse_error",20)]:
-        if col in df.columns: sv -= df[col].fillna(0).astype(int) * pen
+    # Date parse errors — penalise per column
+    date_pen = max(10, int(60 / max(len(date_cols), 1)))
+    for col in date_cols:
+        ecol = f"{col}_parse_error"
+        if ecol in df.columns:
+            sv -= df[ecol].fillna(0).astype(int) * date_pen
+    # Categorical columns with very high placeholder rate get a light penalty
+    for col in cat_cols[:5]:
+        if col in df.columns:
+            ph_rate = df[col].astype(str).str.upper().isin(PLACEHOLDER_VALUES).mean()
+            if ph_rate > 0.5:
+                sv -= pd.Series(20.0, index=df.index)
     df["dq_score_validity"] = _clamp(sv).round(1)
 
+    # ── ACCURACY (35%) ────────────────────────────────────────────────────────
     sa = pd.Series(100.0, index=df.index)
-    for col, pen in [("amount_negative",70),("total_amount_negative",70),
-                     ("tax_amount_negative",40),("amount_above_max",40),
-                     ("total_amount_above_max",40),("amount_outlier",20),
-                     ("total_amount_outlier",20),("tax_amount_outlier",10)]:
-        if col in df.columns: sa -= df[col].fillna(0).astype(int) * pen
+    neg_pen = max(20, int(70 / max(len(num_cols), 1)))
+    out_pen = max(10, int(30 / max(len(num_cols), 1)))
+    abv_pen = max(10, int(30 / max(len(num_cols), 1)))
+    for col in num_cols:
+        if f"{col}_negative"  in df.columns: sa -= df[f"{col}_negative"].fillna(0)  * neg_pen
+        if f"{col}_above_max" in df.columns: sa -= df[f"{col}_above_max"].fillna(0)  * abv_pen
+        if f"{col}_outlier"   in df.columns: sa -= df[f"{col}_outlier"].fillna(0)    * out_pen
     df["dq_score_accuracy"] = _clamp(sa).round(1)
 
+    # ── CONSISTENCY (15%) ─────────────────────────────────────────────────────
     sco = pd.Series(100.0, index=df.index)
-    if "status" in df.columns and "payment_date" in df.columns:
-        paid    = df["status"].astype(str).str.upper() == "PAID"
-        no_date = df["payment_date"].astype(str).str.strip().str.upper().isin(PLACEHOLDER_VALUES)
-        sco -= (paid & no_date).astype(float) * 60
-    if all(c in df.columns for c in ["amount","tax_amount","total_amount"]):
-        amt = pd.to_numeric(df["amount"], errors="coerce")
-        tax = pd.to_numeric(df["tax_amount"], errors="coerce").fillna(0)
-        tot = pd.to_numeric(df["total_amount"], errors="coerce")
-        sco -= (amt.notna() & tot.notna() & ((tot-(amt+tax)).abs() > 0.02)).astype(float) * 60
-    if "invoice_date" in df.columns and "due_date" in df.columns:
-        inv = pd.to_datetime(df["invoice_date"], errors="coerce")
-        due = pd.to_datetime(df["due_date"], errors="coerce")
-        sco -= (inv.notna() & due.notna() & (due < inv)).astype(float) * 40
+    # Universal: check pairs of date columns for logical ordering
+    # e.g. start < end, created < updated, invoice < due
+    START_HINTS = {"start", "created", "invoice", "hire", "open",  "from", "begin", "order"}
+    END_HINTS   = {"end",   "due",     "close",   "term", "closed","to",   "expire","delivery","ship"}
+    date_pairs  = []
+    for c1 in date_cols:
+        for c2 in date_cols:
+            if c1 == c2: continue
+            c1l = c1.lower(); c2l = c2.lower()
+            c1_start = any(h in c1l for h in START_HINTS)
+            c2_end   = any(h in c2l for h in END_HINTS)
+            if c1_start and c2_end:
+                date_pairs.append((c1, c2))
+    for c1, c2 in date_pairs[:3]:  # check up to 3 pairs
+        d1 = pd.to_datetime(df[c1], errors="coerce")
+        d2 = pd.to_datetime(df[c2], errors="coerce")
+        bad = d1.notna() & d2.notna() & (d2 < d1)
+        sco -= bad.astype(float) * 40
     df["dq_score_consistency"] = _clamp(sco).round(1)
 
+    # ── UNIQUENESS (5%) ───────────────────────────────────────────────────────
     su = pd.Series(100.0, index=df.index)
-    if "invoice_number" in df.columns:
-        su -= df["invoice_number"].duplicated(keep=False).astype(float) * 100
+    if id_cols:
+        # Penalise if ANY id column has duplicates
+        for col in id_cols[:2]:
+            if col in df.columns:
+                su -= df[col].duplicated(keep=False).astype(float) * (50 / min(len(id_cols), 2))
     df["dq_score_uniqueness"] = _clamp(su).round(1)
 
-    overall = (df["dq_score_completeness"]*0.20 + df["dq_score_validity"]*0.25 +
-               df["dq_score_accuracy"]*0.35   + df["dq_score_consistency"]*0.15 +
-               df["dq_score_uniqueness"]*0.05).clip(0,100).round(1)
+    # ── COMPOSITE ────────────────────────────────────────────────────────────
+    overall = (
+        df["dq_score_completeness"] * 0.20 +
+        df["dq_score_validity"]     * 0.25 +
+        df["dq_score_accuracy"]     * 0.35 +
+        df["dq_score_consistency"]  * 0.15 +
+        df["dq_score_uniqueness"]   * 0.05
+    ).clip(0, 100).round(1)
+
     df["dq_score"] = overall.astype(int)
-    df["dq_grade"] = overall.apply(lambda s: "A" if s>=90 else "B" if s>=75 else "C" if s>=60 else "D" if s>=40 else "F")
+    df["dq_grade"] = overall.apply(
+        lambda s: "A" if s>=90 else "B" if s>=75 else "C" if s>=60 else "D" if s>=40 else "F"
+    )
 
     def sev(r):
-        if r.dq_score_accuracy<30 or r.dq_score_consistency<40: return "CRITICAL"
-        if r.dq_score_accuracy<60 or r.dq_score_validity<40 or r.dq_score<50: return "HIGH"
-        if r.dq_score<70 or min(r.dq_score_accuracy,r.dq_score_consistency,
-                                r.dq_score_validity,r.dq_score_completeness)<60: return "MEDIUM"
-        if r.dq_score<85: return "LOW"
+        if r.dq_score_accuracy < 30 or r.dq_score_consistency < 40: return "CRITICAL"
+        if r.dq_score_accuracy < 60 or r.dq_score_validity < 40 or r.dq_score < 50: return "HIGH"
+        if r.dq_score < 70 or min(r.dq_score_accuracy, r.dq_score_consistency,
+                                  r.dq_score_validity, r.dq_score_completeness) < 60: return "MEDIUM"
+        if r.dq_score < 85: return "LOW"
         return "CLEAN"
+
     df["dq_severity"] = df[["dq_score","dq_score_accuracy","dq_score_consistency",
                              "dq_score_validity","dq_score_completeness"]].apply(sev, axis=1)
 
-    ISSUE_RULES = [
-        ("amount_negative",          "[Accuracy] Negative invoice amount"),
-        ("total_amount_negative",    "[Accuracy] Negative total amount"),
-        ("tax_amount_negative",      "[Accuracy] Negative tax amount"),
-        ("amount_above_max",         "[Accuracy] Amount exceeds max threshold"),
-        ("total_amount_above_max",   "[Accuracy] Total exceeds max threshold"),
-        ("amount_outlier",           "[Accuracy] Amount is a statistical outlier"),
-        ("total_amount_outlier",     "[Accuracy] Total is a statistical outlier"),
-        ("currency_invalid",         "[Validity] Invalid currency code"),
-        ("status_invalid",           "[Validity] Invalid invoice status"),
-        ("invoice_date_parse_error", "[Validity] Invoice date unparseable"),
-        ("due_date_parse_error",     "[Validity] Due date unparseable"),
-        ("payment_date_parse_error", "[Validity] Payment date unparseable"),
-        ("had_nulls",                "[Completeness] Row had missing values"),
-    ]
-    issues = [""] * len(df)
-    for col, label in ISSUE_RULES:
-        if col not in df.columns: continue
-        for i, v in enumerate(df[col].fillna(0).astype(int).tolist()):
-            if v: issues[i] = (issues[i] + " | " + label) if issues[i] else label
+    # ── ISSUE LOG ─────────────────────────────────────────────────────────────
+    issue_rules = (
+        [(f"{c}_parse_error", f"[Validity] {c}: date unparseable")   for c in date_cols] +
+        [(f"{c}_negative",    f"[Accuracy] {c}: negative value")      for c in num_cols] +
+        [(f"{c}_above_max",   f"[Accuracy] {c}: exceeds max threshold") for c in num_cols] +
+        [(f"{c}_outlier",     f"[Accuracy] {c}: statistical outlier") for c in num_cols] +
+        [("had_nulls",        "[Completeness] Row had missing values")]
+    )
+    issues = [""] * n
+    for flag_col, label in issue_rules:
+        if flag_col not in df.columns: continue
+        for i, v in enumerate(df[flag_col].fillna(0).astype(int).tolist()):
+            if v:
+                issues[i] = (issues[i] + " | " + label) if issues[i] else label
+    # Consistency date pair issues
+    for c1, c2 in date_pairs[:3]:
+        d1 = pd.to_datetime(df[c1], errors="coerce")
+        d2 = pd.to_datetime(df[c2], errors="coerce")
+        bad = (d1.notna() & d2.notna() & (d2 < d1)).tolist()
+        lbl = f"[Consistency] {c2} is before {c1}"
+        for i, v in enumerate(bad):
+            if v:
+                issues[i] = (issues[i] + " | " + lbl) if issues[i] else lbl
     df["dq_issues"] = issues
 
     grade_dist = df["dq_grade"].value_counts().to_dict()
     sev_dist   = df["dq_severity"].value_counts().to_dict()
     stats = {
-        "mean_dq_score":        round(float(overall.mean()), 1),
-        "median_dq_score":      round(float(overall.median()), 1),
-        "perfect_rows":         int((overall >= 99).sum()),
-        "avg_completeness":     round(float(df["dq_score_completeness"].mean()), 1),
-        "avg_validity":         round(float(df["dq_score_validity"].mean()), 1),
-        "avg_accuracy":         round(float(df["dq_score_accuracy"].mean()), 1),
-        "avg_consistency":      round(float(df["dq_score_consistency"].mean()), 1),
-        "avg_uniqueness":       round(float(df["dq_score_uniqueness"].mean()), 1),
+        "mean_dq_score":    round(float(overall.mean()), 1),
+        "median_dq_score":  round(float(overall.median()), 1),
+        "perfect_rows":     int((overall >= 99).sum()),
+        "avg_completeness": round(float(df["dq_score_completeness"].mean()), 1),
+        "avg_validity":     round(float(df["dq_score_validity"].mean()), 1),
+        "avg_accuracy":     round(float(df["dq_score_accuracy"].mean()), 1),
+        "avg_consistency":  round(float(df["dq_score_consistency"].mean()), 1),
+        "avg_uniqueness":   round(float(df["dq_score_uniqueness"].mean()), 1),
         **{f"grade_{k}": v for k, v in grade_dist.items()},
         **{f"sev_{k}":   v for k, v in sev_dist.items()},
     }
     return df, stats
 
-# ────────────────────────────────────────────────────────────────────────────
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # HEADER
-# ────────────────────────────────────────────────────────────────────────────
-st.title("📊 Finance Data Quality Pipeline")
-st.caption("Upload your CSV or generate demo data · configure thresholds · run pipeline · explore results")
+# ═══════════════════════════════════════════════════════════════════════════════
+st.title("🔬 DataQual AI")
+st.caption("Upload any dataset · auto-detect column types · run universal DQ pipeline · explore results")
 st.divider()
 
-# ────────────────────────────────────────────────────────────────────────────
-# DATA SOURCE SECTION
-# ────────────────────────────────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+# DATA SOURCE
+# ═══════════════════════════════════════════════════════════════════════════════
 st.header("📁 Data Source")
 
 src_col1, src_col2 = st.columns([3, 1])
-
 with src_col1:
     uploaded_file = st.file_uploader(
-        "Upload your finance CSV",
+        "Upload any CSV — finance, HR, sales, supply chain, or anything else",
         type=["csv"],
-        help="Any CSV with finance data — the pipeline will auto-detect columns.",
+        help="The pipeline auto-detects column types and applies the right checks.",
     )
-
 with src_col2:
     st.markdown("<br>", unsafe_allow_html=True)
-    n_demo  = st.number_input("Demo rows", 100, 1000, 300, 50)
+    n_demo    = st.number_input("Demo rows", 100, 1000, 300, 50)
     demo_seed = st.number_input("Seed", value=42, step=1)
-    gen_btn = st.button("🎲 Generate demo data", use_container_width=True)
+    gen_btn   = st.button("🎲 Generate demo data", use_container_width=True)
 
 if gen_btn:
     st.session_state["input_df"] = generate_demo(int(n_demo), int(demo_seed))
     st.session_state.pop("scored_df", None)
-    st.success(f"Demo dataset ready — {len(st.session_state['input_df'])} rows (with injected dirty data)")
+    st.session_state.pop("detected_types", None)
+    st.session_state["_file_key"] = "demo"
+    st.success(f"Demo dataset ready — {len(st.session_state['input_df'])} rows")
 
 if uploaded_file is not None:
-    # Fingerprint the file so we only reload when the user picks a NEW file.
-    # Without this, every sidebar-filter change triggers a rerun, re-reads the
-    # same file, pops scored_df, and resets the view to an empty Dashboard.
     file_key = f"{uploaded_file.name}_{uploaded_file.size}"
-    if st.session_state.get("_uploaded_file_key") != file_key:
+    if st.session_state.get("_file_key") != file_key:
         try:
             st.session_state["input_df"] = pd.read_csv(uploaded_file)
             st.session_state.pop("scored_df", None)
-            st.session_state["_uploaded_file_key"] = file_key
-            st.success(f"Uploaded successfully — {len(st.session_state['input_df'])} rows × {len(st.session_state['input_df'].columns)} columns")
-        except Exception as e:
-            st.error(f"Could not read CSV: {e}")
+            st.session_state.pop("detected_types", None)
+            st.session_state["_file_key"] = file_key
+            df_tmp = st.session_state["input_df"]
+            st.success(f"Uploaded — {len(df_tmp):,} rows × {len(df_tmp.columns)} columns")
+        except Exception as ex:
+            st.error(f"Could not read CSV: {ex}")
 
-# ────────────────────────────────────────────────────────────────────────────
-# RAW DATA PREVIEW
-# ────────────────────────────────────────────────────────────────────────────
+# ─── Raw preview ─────────────────────────────────────────────────────────────
 if "input_df" in st.session_state:
     input_df = st.session_state["input_df"]
 
-    with st.expander("👁️ Raw data preview", expanded=True):
+    with st.expander("👁️ Raw data preview", expanded=False):
         p1, p2, p3 = st.columns(3)
-        p1.metric("Rows", f"{len(input_df):,}")
-        p2.metric("Columns", len(input_df.columns))
+        p1.metric("Rows",           f"{len(input_df):,}")
+        p2.metric("Columns",        len(input_df.columns))
         p3.metric("Missing values", f"{int(input_df.isnull().sum().sum()):,}")
         st.dataframe(input_df.head(20), use_container_width=True)
 
     st.divider()
 
-    # ── Run button ────────────────────────────────────────────────────────────
+    # ═══════════════════════════════════════════════════════════════════════════
+    # v2.1 — DATA PROFILE SECTION (before running the pipeline)
+    # ═══════════════════════════════════════════════════════════════════════════
+    st.header("🔍 Auto-Detected Data Profile")
+    st.caption("Column types detected automatically — no configuration needed")
+
+    # Run detection (cached per dataframe)
+    if "detected_types" not in st.session_state:
+        with st.spinner("Detecting column types…"):
+            detected_types = detect_col_types(input_df)
+        st.session_state["detected_types"] = detected_types
+    else:
+        detected_types = st.session_state["detected_types"]
+
+    col_mapping = map_columns_to_roles(input_df, detected_types)
+    st.session_state["col_mapping"] = col_mapping
+
+    # Type-count KPIs
+    type_counts = Counter(detected_types.values())
+    tk = st.columns(6)
+    for i, (dtype, meta) in enumerate(COL_TYPE_META.items()):
+        cnt = type_counts.get(dtype, 0)
+        tk[i].metric(f"{meta['icon']} {meta['label']}", cnt)
+
+    st.divider()
+
+    # Column mapping summary
+    cm1, cm2, cm3, cm4 = st.columns(4)
+    cm1.markdown("**📅 Date columns**")
+    cm1.write("\n".join(f"• `{c}`" for c in col_mapping["date_columns"]) or "_none detected_")
+    cm2.markdown("**🔢 Numeric columns**")
+    cm2.write("\n".join(f"• `{c}`" for c in col_mapping["numeric_columns"]) or "_none detected_")
+    cm3.markdown("**🆔 ID columns**")
+    cm3.write("\n".join(f"• `{c}`" for c in col_mapping["id_columns"]) or "_none detected_")
+    cm4.markdown("**🏷️ Categorical columns**")
+    cm4.write("\n".join(f"• `{c}`" for c in col_mapping["categorical_columns"]) or "_none detected_")
+
+    st.divider()
+
+    # Column health table
+    with st.expander("📊 Full column profile", expanded=True):
+        profiles = profile_dataframe(input_df, json.dumps(detected_types))
+        prof_df  = pd.DataFrame(profiles)
+
+        display_cols = ["column","type","null_pct","unique_count","unique_pct","sample"]
+        if "min" in prof_df.columns:
+            display_cols += ["min","max","mean","zero_pct","neg_pct"]
+
+        st.dataframe(
+            prof_df[[c for c in display_cols if c in prof_df.columns]],
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "null_pct":    st.column_config.ProgressColumn("Null %",    min_value=0, max_value=100, format="%.1f%%"),
+                "unique_pct":  st.column_config.ProgressColumn("Unique %",  min_value=0, max_value=100, format="%.1f%%"),
+                "zero_pct":    st.column_config.ProgressColumn("Zero %",    min_value=0, max_value=100, format="%.1f%%"),
+                "neg_pct":     st.column_config.ProgressColumn("Negative %",min_value=0, max_value=100, format="%.1f%%"),
+                "type":        st.column_config.TextColumn("Detected type"),
+                "sample":      st.column_config.TextColumn("Sample values"),
+            }
+        )
+
+        # Null heatmap bar chart
+        null_df = prof_df[prof_df["null_pct"] > 0].sort_values("null_pct", ascending=False)
+        if not null_df.empty:
+            st.subheader("Null % by column")
+            fig_null = px.bar(
+                null_df, x="column", y="null_pct",
+                color="null_pct",
+                color_continuous_scale=["#639922","#EF9F27","#D85A30","#E24B4A"],
+                range_color=[0,100],
+                labels={"null_pct":"Null %","column":"Column"},
+            )
+            fig_null.update_layout(
+                height=280, showlegend=False,
+                plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
+                margin=dict(t=10,b=10), coloraxis_showscale=False,
+            )
+            st.plotly_chart(fig_null, use_container_width=True)
+
+    st.divider()
+
+    # ─── Run Pipeline ────────────────────────────────────────────────────────
     if st.button("🚀 Run Pipeline", type="primary", use_container_width=True):
         with st.spinner("Cleaning data…"):
-            cleaned_df, clean_stats = run_cleaning(input_df)
+            cleaned_df, clean_stats = run_cleaning(input_df, col_mapping)
         with st.spinner("Scoring across 5 dimensions…"):
-            scored_df, score_stats = run_scoring(cleaned_df)
+            scored_df, score_stats  = run_scoring(cleaned_df, col_mapping)
         st.session_state["scored_df"]   = scored_df
         st.session_state["clean_stats"] = clean_stats
         st.session_state["score_stats"] = score_stats
         st.success(f"Pipeline complete — {len(scored_df):,} records scored.")
 
-# ────────────────────────────────────────────────────────────────────────────
-# RESULTS
-# ────────────────────────────────────────────────────────────────────────────
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# RESULTS — 7 TABS
+# ═══════════════════════════════════════════════════════════════════════════════
 if "scored_df" in st.session_state:
     df          = st.session_state["scored_df"]
     clean_stats = st.session_state["clean_stats"]
     score_stats = st.session_state["score_stats"]
+    col_mapping = st.session_state.get("col_mapping", {})
+    det_types   = st.session_state.get("detected_types", {})
 
     st.divider()
     st.header("✅ Pipeline Results")
 
-    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
-        "📊 Dashboard",
-        "📐 Dimension Analysis",
-        "📋 Record Explorer",
-        "🔬 Deep Dive",
-        "📈 Statistics",
-        "⬇️ Export",
-    ])
-
-    # ── Sidebar filters (applied across all tabs) ────────────────────────────
+    # Sidebar result filters
     with st.sidebar:
         st.divider()
         st.subheader("🔍 Result Filters")
@@ -424,17 +717,73 @@ if "scored_df" in st.session_state:
         df["dq_score"].between(score_range[0], score_range[1])
     ].copy()
 
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
+        "🔍 Profile",
+        "📊 Dashboard",
+        "📐 Dimension Analysis",
+        "📋 Record Explorer",
+        "🔬 Deep Dive",
+        "📈 Statistics",
+        "⬇️ Export",
+    ])
+
     # =========================================================================
-    # TAB 1 — DASHBOARD
+    # TAB 1 — PROFILE  (v2.1 NEW)
     # =========================================================================
     with tab1:
+        st.subheader("Column type breakdown")
+        type_counts = Counter(det_types.values())
+        tk2 = st.columns(6)
+        for i, (dtype, meta) in enumerate(COL_TYPE_META.items()):
+            tk2[i].metric(f"{meta['icon']} {meta['label']}", type_counts.get(dtype, 0))
+
+        st.divider()
+        st.subheader("Role mapping (used by pipeline)")
+        r1, r2, r3, r4 = st.columns(4)
+        r1.markdown("**📅 Date columns**")
+        for c in col_mapping.get("date_columns",[]): r1.markdown(f"• `{c}`")
+        r2.markdown("**🔢 Numeric columns**")
+        for c in col_mapping.get("numeric_columns",[]): r2.markdown(f"• `{c}`")
+        r3.markdown("**🆔 ID columns**")
+        for c in col_mapping.get("id_columns",[]): r3.markdown(f"• `{c}`")
+        r4.markdown("**🏷️ Categorical columns**")
+        for c in col_mapping.get("categorical_columns",[]): r4.markdown(f"• `{c}`")
+
+        st.divider()
+        st.subheader("Full column profile")
+        profiles  = profile_dataframe(input_df, json.dumps(det_types))
+        prof_df2  = pd.DataFrame(profiles)
+        disp_cols = ["column","type","null_pct","unique_count","unique_pct","sample","min","max","mean","zero_pct","neg_pct"]
+        st.dataframe(
+            prof_df2[[c for c in disp_cols if c in prof_df2.columns]],
+            use_container_width=True, hide_index=True, height=450,
+            column_config={
+                "null_pct":  st.column_config.ProgressColumn("Null %",    min_value=0, max_value=100, format="%.1f%%"),
+                "unique_pct":st.column_config.ProgressColumn("Unique %",  min_value=0, max_value=100, format="%.1f%%"),
+                "zero_pct":  st.column_config.ProgressColumn("Zero %",    min_value=0, max_value=100, format="%.1f%%"),
+                "neg_pct":   st.column_config.ProgressColumn("Negative %",min_value=0, max_value=100, format="%.1f%%"),
+            }
+        )
+
+    # =========================================================================
+    # TAB 2 — DASHBOARD
+    # =========================================================================
+    with tab2:
         k1,k2,k3,k4,k5 = st.columns(5)
         k1.metric("Total records",    f"{len(df_f):,}")
         k2.metric("Mean DQ score",    f"{df_f['dq_score'].mean():.1f} / 100")
         k3.metric("Perfect rows",     int((df_f["dq_score"]>=99).sum()))
         k4.metric("Critical records", int((df_f["dq_severity"]=="CRITICAL").sum()))
-        k5.metric("Validity score",   f"{df_f['dq_score_validity'].mean():.1f}",
-                  "⚠️ lowest" if df_f["dq_score_validity"].mean() < 60 else "✅ ok",
+        lowest_dim = min(
+            [("Completeness",df_f["dq_score_completeness"].mean()),
+             ("Validity",    df_f["dq_score_validity"].mean()),
+             ("Accuracy",    df_f["dq_score_accuracy"].mean()),
+             ("Consistency", df_f["dq_score_consistency"].mean()),
+             ("Uniqueness",  df_f["dq_score_uniqueness"].mean())],
+            key=lambda x: x[1]
+        )
+        k5.metric(f"Lowest: {lowest_dim[0]}", f"{lowest_dim[1]:.1f}",
+                  "⚠️ needs attention" if lowest_dim[1] < 60 else "✅ ok",
                   delta_color="inverse")
 
         c1, c2 = st.columns([3,2])
@@ -449,7 +798,6 @@ if "scored_df" in st.session_state:
                               plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
                               margin=dict(t=10,b=10))
             st.plotly_chart(fig, use_container_width=True)
-
         with c2:
             st.subheader("Grade distribution")
             grd_df = df_f["dq_grade"].value_counts().reindex(["A","B","C","D","F"], fill_value=0).reset_index()
@@ -472,9 +820,9 @@ if "scored_df" in st.session_state:
         st.plotly_chart(fig3, use_container_width=True)
 
     # =========================================================================
-    # TAB 2 — DIMENSION ANALYSIS
+    # TAB 3 — DIMENSION ANALYSIS
     # =========================================================================
-    with tab2:
+    with tab3:
         dim_avgs = {
             "Completeness": df_f["dq_score_completeness"].mean(),
             "Validity":     df_f["dq_score_validity"].mean(),
@@ -484,20 +832,17 @@ if "scored_df" in st.session_state:
         }
         weights = {"Completeness":"20%","Validity":"25%","Accuracy":"35%",
                    "Consistency":"15%","Uniqueness":"5%"}
-
         d1,d2,d3,d4,d5 = st.columns(5)
         for col_obj, (dim, avg) in zip([d1,d2,d3,d4,d5], dim_avgs.items()):
             col_obj.metric(f"{dim} ({weights[dim]})", f"{avg:.1f}")
             col_obj.progress(int(avg)/100)
 
         st.divider()
-
         dim_df = pd.DataFrame({
             "Dimension": list(dim_avgs.keys()),
             "Score":     [round(v,1) for v in dim_avgs.values()],
             "Weight":    list(weights.values()),
         }).sort_values("Score")
-
         fig_dim = px.bar(dim_df, x="Score", y="Dimension", orientation="h",
                          color="Dimension", color_discrete_map=DIM_COLORS,
                          text="Score", range_x=[0,100], custom_data=["Weight"])
@@ -518,78 +863,69 @@ if "scored_df" in st.session_state:
         if all_issues:
             top = Counter(all_issues).most_common(10)
             iss_df = pd.DataFrame(top, columns=["Issue","Count"])
-            iss_df["Dimension"] = iss_df["Issue"].str.extract(r'\[(\w+)\]')[0]
-            iss_df["Label"]     = iss_df["Issue"].str.replace(r'\[\w+\] ','',regex=True)
+            iss_df["Dimension"] = iss_df["Issue"].str.extract(r"\[(\w+)\]")[0]
+            iss_df["Label"]     = iss_df["Issue"].str.replace(r"\[\w+\] ","",regex=True)
             fig_iss = px.bar(iss_df.sort_values("Count"), x="Count", y="Label",
                              orientation="h", color="Dimension",
                              color_discrete_map={d: DIM_COLORS.get(d,"#888") for d in iss_df["Dimension"].unique()},
                              text="Count")
             fig_iss.update_traces(textposition="outside")
-            fig_iss.update_layout(height=380, showlegend=True,
+            fig_iss.update_layout(height=400, showlegend=True,
                                   plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
-                                  margin=dict(l=0,r=40,t=10,b=10), legend_title="Dimension",
-                                  xaxis_title="", yaxis_title="")
+                                  margin=dict(l=0,r=40,t=10,b=10))
             st.plotly_chart(fig_iss, use_container_width=True)
+        else:
+            st.success("No issues found across all records.")
 
     # =========================================================================
-    # TAB 3 — RECORD EXPLORER
+    # TAB 4 — RECORD EXPLORER
     # =========================================================================
-    with tab3:
-        disp_cols = ["invoice_number","vendor_name","amount","currency","status",
-                     "dq_score","dq_grade","dq_severity",
-                     "dq_score_completeness","dq_score_validity",
-                     "dq_score_accuracy","dq_score_consistency","dq_score_uniqueness"]
-        disp_cols = [c for c in disp_cols if c in df_f.columns]
+    with tab4:
+        score_cols_all = ["dq_score","dq_score_completeness","dq_score_validity",
+                          "dq_score_accuracy","dq_score_consistency","dq_score_uniqueness"]
+        id_cols_avail  = col_mapping.get("id_columns",[])[:2]
+        num_cols_avail = col_mapping.get("numeric_columns",[])[:2]
+        cat_cols_avail = col_mapping.get("categorical_columns",[])[:2]
+        show = (id_cols_avail + num_cols_avail + cat_cols_avail +
+                ["dq_score","dq_grade","dq_severity"] + score_cols_all)
+        show = [c for c in show if c in df_f.columns]
+        # deduplicate while preserving order
+        seen = set(); show = [c for c in show if not (c in seen or seen.add(c))]
 
         r1, r2 = st.columns(2)
-        sort_col = r1.selectbox("Sort by", ["dq_score","dq_score_accuracy","dq_score_validity",
-                                            "dq_score_completeness","dq_score_consistency","amount"])
+        sort_col = r1.selectbox("Sort by", score_cols_all + num_cols_avail)
         sort_asc = r2.checkbox("Ascending (worst first)", value=True)
 
-        table_df = df_f[disp_cols].sort_values(sort_col, ascending=sort_asc).reset_index(drop=True)
-
+        table_df = df_f[show].sort_values(sort_col, ascending=sort_asc).reset_index(drop=True)
         st.dataframe(
-            table_df,
-            use_container_width=True,
-            height=500,
-            column_config={
-                "dq_score": st.column_config.ProgressColumn(
-                    "dq_score", min_value=0, max_value=100, format="%d"),
-                "dq_score_accuracy": st.column_config.ProgressColumn(
-                    "dq_score_accuracy", min_value=0, max_value=100, format="%d"),
-                "dq_score_validity": st.column_config.ProgressColumn(
-                    "dq_score_validity", min_value=0, max_value=100, format="%d"),
-                "dq_score_completeness": st.column_config.ProgressColumn(
-                    "dq_score_completeness", min_value=0, max_value=100, format="%d"),
-                "dq_score_consistency": st.column_config.ProgressColumn(
-                    "dq_score_consistency", min_value=0, max_value=100, format="%d"),
-            },
+            table_df, use_container_width=True, height=500,
+            column_config={c: st.column_config.ProgressColumn(c, min_value=0, max_value=100, format="%d")
+                           for c in score_cols_all if c in table_df.columns},
         )
 
     # =========================================================================
-    # TAB 4 — DEEP DIVE
+    # TAB 5 — DEEP DIVE
     # =========================================================================
-    with tab4:
-        if "invoice_number" in df_f.columns:
-            inv_options = df_f["invoice_number"].tolist()
-            selected    = st.selectbox("Select an invoice to inspect", inv_options)
-            row         = df_f[df_f["invoice_number"] == selected].iloc[0]
+    with tab5:
+        id_col = (col_mapping.get("id_columns") or list(df_f.columns))[0]
+        if id_col in df_f.columns:
+            options  = df_f[id_col].tolist()
+            selected = st.selectbox(f"Select a record by `{id_col}`", options)
+            row      = df_f[df_f[id_col] == selected].iloc[0]
         else:
-            idx_options = list(range(len(df_f)))
-            selected    = st.selectbox("Select a row index", idx_options)
-            row         = df_f.iloc[selected]
+            idx      = st.selectbox("Select row index", list(range(len(df_f))))
+            row      = df_f.iloc[idx]
 
         dd1,dd2,dd3 = st.columns(3)
         dd1.metric("Overall DQ Score", f"{row['dq_score']} / 100")
         dd2.metric("Grade",    row["dq_grade"])
         dd3.metric("Severity", row["dq_severity"])
 
-        st.markdown("**Dimension breakdown**")
         dims = ["Completeness","Validity","Accuracy","Consistency","Uniqueness"]
+        st.markdown("**Dimension breakdown**")
         dim_cols_ui = st.columns(5)
         for i, dim in enumerate(dims):
-            key = f"dq_score_{dim.lower()}"
-            val = float(row.get(key, 0))
+            val = float(row.get(f"dq_score_{dim.lower()}", 0))
             dim_cols_ui[i].metric(dim, f"{val:.0f}")
             dim_cols_ui[i].progress(int(val)/100)
 
@@ -598,12 +934,12 @@ if "scored_df" in st.session_state:
             r=[float(row.get(f"dq_score_{d.lower()}", 0)) for d in dims] +
               [float(row.get("dq_score_completeness", 0))],
             theta=dims + [dims[0]],
-            fill="toself",
-            line_color="#378ADD",
+            fill="toself", line_color="#378ADD",
         ))
-        fig_radar.update_layout(polar=dict(radialaxis=dict(visible=True, range=[0,100])),
-                                height=350, margin=dict(t=10,b=10),
-                                paper_bgcolor="rgba(0,0,0,0)")
+        fig_radar.update_layout(
+            polar=dict(radialaxis=dict(visible=True, range=[0,100])),
+            height=350, margin=dict(t=10,b=10), paper_bgcolor="rgba(0,0,0,0)",
+        )
         st.plotly_chart(fig_radar, use_container_width=True)
 
         if row.get("dq_issues",""):
@@ -623,107 +959,87 @@ if "scored_df" in st.session_state:
             st.success("✅ No issues — this record passed all checks.")
 
     # =========================================================================
-    # TAB 5 — STATISTICS
-    # =========================================================================
-    with tab5:
-        st.subheader("Cleaning statistics")
-        clean_df = pd.DataFrame([{"Metric": k, "Value": v} for k, v in clean_stats.items()])
-        st.dataframe(clean_df, use_container_width=True, hide_index=True)
-
-        st.divider()
-        st.subheader("Scoring statistics")
-        score_df = pd.DataFrame([{"Metric": k, "Value": v} for k, v in score_stats.items()])
-        st.dataframe(score_df, use_container_width=True, hide_index=True)
-
-    # =========================================================================
-    # TAB 6 — EXPORT
+    # TAB 6 — STATISTICS
     # =========================================================================
     with tab6:
-        # Full dataset download
-        st.subheader("\u2b07\ufe0f Download full scored dataset")
-        st.caption(f"{len(df_f):,} records \u00b7 all severity levels \u00b7 includes all DQ columns")
+        st.subheader("Cleaning statistics")
+        st.dataframe(pd.DataFrame([{"Metric":k,"Value":v} for k,v in clean_stats.items()]),
+                     use_container_width=True, hide_index=True)
+        st.divider()
+        st.subheader("Scoring statistics")
+        st.dataframe(pd.DataFrame([{"Metric":k,"Value":v} for k,v in score_stats.items()]),
+                     use_container_width=True, hide_index=True)
+        st.divider()
+        st.subheader("Column role mapping used")
+        role_rows = []
+        for role, cols in col_mapping.items():
+            if isinstance(cols, list):
+                for c in cols:
+                    role_rows.append({"Role": role, "Column": c,
+                                      "Detected type": det_types.get(c,"—")})
+        if role_rows:
+            st.dataframe(pd.DataFrame(role_rows), use_container_width=True, hide_index=True)
+
+    # =========================================================================
+    # TAB 7 — EXPORT
+    # =========================================================================
+    with tab7:
+        st.subheader("⬇️ Download full scored dataset")
+        st.caption(f"{len(df_f):,} records · all severity levels · includes all DQ columns")
         st.download_button(
-            label="\u2b07\ufe0f Download full scored dataset (CSV)",
+            label="⬇️ Download full scored dataset (CSV)",
             data=df_f.to_csv(index=False).encode("utf-8"),
-            file_name=f"finance_dq_scored_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+            file_name=f"dq_scored_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
             mime="text/csv",
             use_container_width=True,
         )
 
         st.divider()
-
-        # Filter -> Preview -> Download
-        st.subheader("\U0001f50e Filter, preview & download by severity")
-
-        fc1, fc2 = st.columns([2, 1])
+        st.subheader("🔎 Filter, preview & download by severity")
+        fc1, fc2 = st.columns([2,1])
         with fc1:
-            sev_dl = st.selectbox(
-                "Severity to preview",
-                ["ALL"] + SEV_ORDER,
-                help="Pick a severity level to inspect records before downloading",
-            )
+            sev_dl = st.selectbox("Severity to preview", ["ALL"] + SEV_ORDER)
         with fc2:
             preview_cols_opt = st.multiselect(
                 "Columns to show",
-                options=[
-                    "invoice_number", "vendor_name", "amount", "currency",
-                    "status", "dq_score", "dq_grade", "dq_severity",
-                    "dq_score_completeness", "dq_score_validity",
-                    "dq_score_accuracy", "dq_score_consistency",
-                    "dq_score_uniqueness", "dq_issues",
-                ],
-                default=[
-                    "invoice_number", "vendor_name", "amount", "currency",
-                    "status", "dq_score", "dq_grade", "dq_severity", "dq_issues",
-                ],
-                help="Choose which columns appear in the preview table",
+                options=list(df_f.columns),
+                default=[c for c in (
+                    col_mapping.get("id_columns",[])[:1] +
+                    col_mapping.get("numeric_columns",[])[:2] +
+                    col_mapping.get("categorical_columns",[])[:2] +
+                    ["dq_score","dq_grade","dq_severity","dq_issues"]
+                ) if c in df_f.columns][:10],
             )
 
         export_df = df_f if sev_dl == "ALL" else df_f[df_f["dq_severity"] == sev_dl]
 
-        # Severity KPIs
-        m1, m2, m3, m4 = st.columns(4)
-        m1.metric("Records", f"{len(export_df):,}")
-        m2.metric("Avg DQ Score", f"{export_df['dq_score'].mean():.1f}" if len(export_df) else "\u2014")
-        m3.metric("Grades (A/B)", int((export_df["dq_grade"].isin(["A","B"])).sum()) if len(export_df) else 0)
-        m4.metric("Grades (D/F)", int((export_df["dq_grade"].isin(["D","F"])).sum()) if len(export_df) else 0)
+        m1,m2,m3,m4 = st.columns(4)
+        m1.metric("Records",      f"{len(export_df):,}")
+        m2.metric("Avg DQ Score", f"{export_df['dq_score'].mean():.1f}" if len(export_df) else "—")
+        m3.metric("Grades A/B",   int(export_df["dq_grade"].isin(["A","B"]).sum()) if len(export_df) else 0)
+        m4.metric("Grades D/F",   int(export_df["dq_grade"].isin(["D","F"]).sum()) if len(export_df) else 0)
 
-        # Preview table
         if len(export_df) == 0:
-            st.info("No records match the selected severity filter.")
+            st.info("No records match the selected severity.")
         else:
             show_cols = [c for c in preview_cols_opt if c in export_df.columns]
             if not show_cols:
-                show_cols = [c for c in ["invoice_number","vendor_name","dq_score","dq_severity"]
-                             if c in export_df.columns]
-
-            score_col_keys = [
-                "dq_score", "dq_score_completeness", "dq_score_validity",
-                "dq_score_accuracy", "dq_score_consistency", "dq_score_uniqueness",
-            ]
-            col_cfg = {
-                c: st.column_config.ProgressColumn(c, min_value=0, max_value=100, format="%d")
-                for c in score_col_keys if c in show_cols
-            }
-
-            st.dataframe(
-                export_df[show_cols].reset_index(drop=True),
-                use_container_width=True,
-                height=420,
-                column_config=col_cfg,
-            )
-            st.caption(
-                f"Showing {len(export_df):,} {sev_dl} records \u00b7 "
-                "scroll right for all columns"
-            )
+                show_cols = [c for c in ["dq_score","dq_severity"] if c in export_df.columns]
+            score_cfg = {c: st.column_config.ProgressColumn(c, min_value=0, max_value=100, format="%d")
+                         for c in ["dq_score","dq_score_completeness","dq_score_validity",
+                                   "dq_score_accuracy","dq_score_consistency","dq_score_uniqueness"]
+                         if c in show_cols}
+            st.dataframe(export_df[show_cols].reset_index(drop=True),
+                         use_container_width=True, height=420, column_config=score_cfg)
+            st.caption(f"Showing {len(export_df):,} {sev_dl} records")
             st.download_button(
-                label=f"\u2b07\ufe0f Download {sev_dl} records ({len(export_df):,} rows)",
+                label=f"⬇️ Download {sev_dl} records ({len(export_df):,} rows)",
                 data=export_df.to_csv(index=False).encode("utf-8"),
-                file_name=f"finance_dq_{sev_dl.lower()}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                file_name=f"dq_{sev_dl.lower()}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
                 mime="text/csv",
                 use_container_width=True,
             )
 
-# Footer
+# ── Footer ────────────────────────────────────────────────────────────────────
 st.divider()
-st.caption("Finance Data Quality Pipeline \u00b7 8 cleaning ops \u00b7 5-dimension DQ scoring \u00b7 Built by Akshay")
+st.caption("DataQual AI · Universal Data Quality Platform · v2.1 · Built by Akshay")
