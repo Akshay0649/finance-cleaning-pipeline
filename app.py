@@ -26,6 +26,7 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
+from sklearn.ensemble import IsolationForest
 
 # ── Page config ───────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -583,6 +584,62 @@ if uploaded_file is not None:
         except Exception as ex:
             st.error(f"Could not read CSV: {ex}")
 
+
+# ── Anomaly Detection ─────────────────────────────────────────────────────────
+def run_anomaly_detection(df: pd.DataFrame, col_mapping: dict) -> pd.DataFrame:
+    """
+    Adds two columns:
+      isolation_score    – IsolationForest score mapped to 0–100 (higher = more anomalous)
+      iqr_outlier_count  – number of numeric cols where the row is an IQR outlier
+    """
+    num_cols = [c for c in col_mapping.get("numeric_columns", []) if c in df.columns]
+    result = df.copy()
+
+    # ── IQR outlier count (per-column, independent) ───────────────────────────
+    iqr_flags = pd.DataFrame(False, index=df.index, columns=num_cols)
+    for col in num_cols:
+        s = df[col].dropna()
+        if len(s) < 4:
+            continue
+        q1, q3 = s.quantile(0.25), s.quantile(0.75)
+        iqr = q3 - q1
+        if iqr == 0:
+            continue
+        lo, hi = q1 - 1.5 * iqr, q3 + 1.5 * iqr
+        iqr_flags[col] = df[col].lt(lo) | df[col].gt(hi)
+    result["iqr_outlier_count"] = iqr_flags.sum(axis=1).astype(int)
+
+    # ── IsolationForest (multivariate across all numeric cols) ────────────────
+    if len(num_cols) >= 1 and len(df) >= 10:
+        X = df[num_cols].copy()
+        X = X.fillna(X.median())          # impute for model
+        try:
+            iso = IsolationForest(
+                n_estimators=100,
+                contamination=0.05,
+                random_state=42,
+                n_jobs=-1,
+            )
+            raw_scores = iso.score_samples(X)   # more negative = more anomalous
+            # Normalise to 0–100 (100 = most anomalous)
+            lo_s, hi_s = raw_scores.min(), raw_scores.max()
+            if hi_s > lo_s:
+                norm = 100 * (1 - (raw_scores - lo_s) / (hi_s - lo_s))
+            else:
+                norm = np.zeros(len(raw_scores))
+            result["isolation_score"] = np.round(norm, 1)
+        except Exception:
+            result["isolation_score"] = 0.0
+    else:
+        result["isolation_score"] = 0.0
+
+    # ── Combined anomaly flag ─────────────────────────────────────────────────
+    result["is_anomaly"] = (
+        (result["isolation_score"] >= 70) |
+        (result["iqr_outlier_count"] >= 2)
+    )
+    return result
+
 # ─── Raw preview ─────────────────────────────────────────────────────────────
 if "input_df" in st.session_state:
     input_df = st.session_state["input_df"]
@@ -684,10 +741,13 @@ if "input_df" in st.session_state:
             cleaned_df, clean_stats = run_cleaning(input_df, col_mapping)
         with st.spinner("Scoring across 5 dimensions…"):
             scored_df, score_stats  = run_scoring(cleaned_df, col_mapping)
+        with st.spinner("Running anomaly detection (IsolationForest + IQR)…"):
+            scored_df = run_anomaly_detection(scored_df, col_mapping)
         st.session_state["scored_df"]   = scored_df
         st.session_state["clean_stats"] = clean_stats
         st.session_state["score_stats"] = score_stats
-        st.success(f"Pipeline complete — {len(scored_df):,} records scored.")
+        n_anom = int(scored_df.get("is_anomaly", pd.Series(dtype=bool)).sum())
+        st.success(f"Pipeline complete — {len(scored_df):,} records scored · {n_anom} anomalies detected.")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -717,7 +777,7 @@ if "scored_df" in st.session_state:
         df["dq_score"].between(score_range[0], score_range[1])
     ].copy()
 
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs([
         "🔍 Profile",
         "📊 Dashboard",
         "📐 Dimension Analysis",
@@ -725,6 +785,7 @@ if "scored_df" in st.session_state:
         "🔬 Deep Dive",
         "📈 Statistics",
         "⬇️ Export",
+        "🤖 Anomaly",
     ])
 
     # =========================================================================
@@ -1007,11 +1068,16 @@ if "scored_df" in st.session_state:
                     col_mapping.get("id_columns",[])[:1] +
                     col_mapping.get("numeric_columns",[])[:2] +
                     col_mapping.get("categorical_columns",[])[:2] +
-                    ["dq_score","dq_grade","dq_severity","dq_issues"]
-                ) if c in df_f.columns][:10],
+                    ["dq_score","dq_grade","dq_severity",
+                     "isolation_score","iqr_outlier_count","is_anomaly","dq_issues"]
+                ) if c in df_f.columns][:12],
             )
 
+        anom_only  = st.checkbox("🤖 Anomalous records only", value=False,
+                                   help="Filter to rows where is_anomaly = True")
         export_df = df_f if sev_dl == "ALL" else df_f[df_f["dq_severity"] == sev_dl]
+        if anom_only and "is_anomaly" in export_df.columns:
+            export_df = export_df[export_df["is_anomaly"] == True]
 
         m1,m2,m3,m4 = st.columns(4)
         m1.metric("Records",      f"{len(export_df):,}")
@@ -1040,6 +1106,124 @@ if "scored_df" in st.session_state:
                 use_container_width=True,
             )
 
+    # =========================================================================
+    # TAB 8 — ANOMALY DETECTION  (v2.2 NEW)
+    # =========================================================================
+    with tab8:
+        has_iso = "isolation_score"   in df.columns
+        has_iqr = "iqr_outlier_count" in df.columns
+        has_flag= "is_anomaly"        in df.columns
+
+        if not has_iso:
+            st.info("Run the pipeline to see anomaly detection results.")
+        else:
+            # ── KPIs ─────────────────────────────────────────────────────────
+            total      = len(df_f)
+            n_anom     = int(df_f["is_anomaly"].sum())            if has_flag else 0
+            pct_anom   = round(100 * n_anom / total, 1)           if total else 0
+            avg_iso    = round(df_f["isolation_score"].mean(), 1) if has_iso else 0
+            max_iqr    = int(df_f["iqr_outlier_count"].max())     if has_iqr else 0
+
+            k1,k2,k3,k4 = st.columns(4)
+            k1.metric("🤖 Anomalies",          f"{n_anom:,}")
+            k2.metric("% Anomalous",           f"{pct_anom}%")
+            k3.metric("Avg Isolation Score",   f"{avg_iso}")
+            k4.metric("Max IQR Violations",    f"{max_iqr}")
+
+            st.divider()
+
+            col_a, col_b = st.columns(2)
+
+            # ── IsolationForest score distribution ───────────────────────────
+            with col_a:
+                st.subheader("🌲 IsolationForest Score Distribution")
+                st.caption("Higher score = more anomalous. Threshold line at 70.")
+                fig_iso = px.histogram(
+                    df_f, x="isolation_score", nbins=40,
+                    color_discrete_sequence=["#534AB7"],
+                    labels={"isolation_score": "Isolation Score"},
+                )
+                fig_iso.add_vline(x=70, line_dash="dash", line_color="red",
+                                  annotation_text="Anomaly threshold (70)",
+                                  annotation_position="top right")
+                fig_iso.update_layout(
+                    height=350, margin=dict(t=20,b=20,l=10,r=10),
+                    plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
+                )
+                st.plotly_chart(fig_iso, use_container_width=True)
+
+            # ── IQR violations per numeric column ────────────────────────────
+            with col_b:
+                st.subheader("📦 IQR Outliers per Column")
+                st.caption("Count of rows flagged as outliers in each numeric column.")
+                num_cols = col_mapping.get("numeric_columns", [])
+                iqr_data = {}
+                for col in num_cols:
+                    if col not in df_f.columns:
+                        continue
+                    s = df_f[col].dropna()
+                    if len(s) < 4:
+                        continue
+                    q1, q3 = s.quantile(0.25), s.quantile(0.75)
+                    iqr_val = q3 - q1
+                    if iqr_val == 0:
+                        continue
+                    lo, hi = q1 - 1.5*iqr_val, q3 + 1.5*iqr_val
+                    iqr_data[col] = int(((df_f[col] < lo) | (df_f[col] > hi)).sum())
+                if iqr_data:
+                    iqr_df = pd.DataFrame(
+                        {"Column": list(iqr_data.keys()),
+                         "Outlier Rows": list(iqr_data.values())}
+                    ).sort_values("Outlier Rows", ascending=False)
+                    fig_iqr = px.bar(
+                        iqr_df, x="Column", y="Outlier Rows",
+                        color="Outlier Rows",
+                        color_continuous_scale="Reds",
+                        labels={"Outlier Rows": "# Outlier Rows"},
+                    )
+                    fig_iqr.update_layout(
+                        height=350, margin=dict(t=20,b=20,l=10,r=10),
+                        plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
+                        showlegend=False, coloraxis_showscale=False,
+                    )
+                    st.plotly_chart(fig_iqr, use_container_width=True)
+                else:
+                    st.info("No IQR outlier data — no numeric columns detected.")
+
+            st.divider()
+
+            # ── Top anomalous records ─────────────────────────────────────────
+            st.subheader("🔴 Top Anomalous Records")
+            st.caption("Rows ranked by IsolationForest score (descending). Both scores shown side-by-side.")
+            top_n = st.slider("Show top N anomalous records", 10, 200, 50, step=10)
+            anom_df = df_f.sort_values("isolation_score", ascending=False).head(top_n)
+            id_cols = col_mapping.get("id_columns", [])
+            show_anom_cols = [c for c in (
+                id_cols[:2] +
+                col_mapping.get("numeric_columns", [])[:3] +
+                ["isolation_score", "iqr_outlier_count", "is_anomaly",
+                 "dq_score", "dq_severity"]
+            ) if c in anom_df.columns]
+            anom_cfg = {}
+            if "isolation_score" in show_anom_cols:
+                anom_cfg["isolation_score"] = st.column_config.ProgressColumn(
+                    "Isolation Score", min_value=0, max_value=100, format="%d")
+            if "dq_score" in show_anom_cols:
+                anom_cfg["dq_score"] = st.column_config.ProgressColumn(
+                    "DQ Score", min_value=0, max_value=100, format="%d")
+            st.dataframe(
+                anom_df[show_anom_cols].reset_index(drop=True),
+                use_container_width=True, height=450,
+                column_config=anom_cfg,
+            )
+            st.download_button(
+                label=f"⬇️ Download anomalous records ({n_anom:,} rows)",
+                data=df_f[df_f["is_anomaly"] == True].to_csv(index=False).encode("utf-8"),
+                file_name=f"dq_anomalies_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                mime="text/csv",
+                use_container_width=True,
+            )
+
 # ── Footer ────────────────────────────────────────────────────────────────────
 st.divider()
-st.caption("DataQual AI · Universal Data Quality Platform · v2.1 · Built by Akshay")
+st.caption("DataQual AI · Universal Data Quality Platform · v2.2 · Built by Akshay")
