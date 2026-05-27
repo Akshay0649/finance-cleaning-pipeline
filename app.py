@@ -36,23 +36,53 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
+# ── Targeted UI polish (safe selectors only) ──────────────────────────────────
+st.markdown("""
+<style>
+/* Tabs — rosewood palette */
+.stTabs [data-baseweb="tab-list"] {
+    background: #F5EEF0;
+    padding: 4px;
+    border-radius: 12px;
+    gap: 2px;
+}
+.stTabs [data-baseweb="tab"] {
+    border-radius: 9px;
+    padding: 8px 16px;
+    color: #5E6472;
+    font-weight: 600;
+    font-size: 13px;
+    border: none;
+}
+.stTabs [aria-selected="true"] {
+    background: #915466;
+    color: #FDFFFF;
+    box-shadow: 0 2px 8px rgba(145,84,102,0.3);
+}
+/* Metric labels */
+[data-testid="stMetricLabel"] { color: #5E6472 !important; font-size: 11px !important; }
+[data-testid="stMetricValue"] { color: #23022E !important; font-weight: 800 !important; }
+</style>
+""", unsafe_allow_html=True)
+
+
 
 # ── Design System — Matte Pastel ─────────────────────────────────────────────
 # Palette: soft lavender bg · white cards · pastel accents
 CHART_BG   = "#ffffff"
 CHART_PLOT = "#fafafa"
-CHART_FONT = "#64748b"
+CHART_FONT = "#5E6472"
 
 # Pastel accent map for dimensions / severity
 PASTEL = {
-    "indigo":  "#818cf8",
-    "violet":  "#a78bfa",
-    "sky":     "#38bdf8",
-    "teal":    "#2dd4bf",
-    "emerald": "#34d399",
-    "amber":   "#fbbf24",
-    "rose":    "#fb7185",
-    "slate":   "#94a3b8",
+    "indigo":  "#915466",   # rosewood primary
+    "violet":  "#C79192",   # rosy taupe
+    "sky":     "#5E6472",   # blue slate
+    "teal":    "#1D9E75",
+    "emerald": "#3B6D11",
+    "amber":   "#EF9F27",
+    "rose":    "#D85A30",
+    "slate":   "#5E6472",
 }
 
 def _chart_layout(**kw):
@@ -69,100 +99,33 @@ def _chart_layout(**kw):
     return base
 
 # Shared axis defaults (use directly in update_layout)
-_GRID_X = dict(showgrid=True,  gridcolor="#f1f5f9", zeroline=False, tickfont=dict(color="#94a3b8"))
-_GRID_Y = dict(showgrid=True,  gridcolor="#f1f5f9", zeroline=False, tickfont=dict(color="#94a3b8"))
-_NO_GRID_Y = dict(showgrid=False, zeroline=False, tickfont=dict(color="#94a3b8"))
+_GRID_X = dict(showgrid=True,  gridcolor="#f1f5f9", zeroline=False, tickfont=dict(color="#5E6472"))
+_GRID_Y = dict(showgrid=True,  gridcolor="#f1f5f9", zeroline=False, tickfont=dict(color="#5E6472"))
+_NO_GRID_Y = dict(showgrid=False, zeroline=False, tickfont=dict(color="#5E6472"))
 
-def kpi_card(label, value, subtitle="", color="#6366F1", icon="", bg=""):
+def kpi_card(label, value, subtitle="", color="#915466", icon="", bg=""):
     """Clean KPI card — white background, coloured top border."""
     ico_html = f"{icon} " if icon else ""
-    sub_html = f'<p style="color:#94A3B8;font-size:11px;margin:5px 0 0;">{subtitle}</p>' if subtitle else ""
+    sub_html = f'<p style="color:#5E6472;font-size:11px;margin:5px 0 0;">{subtitle}</p>' if subtitle else ""
     return (
         f'<div style="background:#fff;border-radius:12px;padding:18px 20px;'
         f'border:1px solid #E2E8F0;border-top:4px solid {color};'
         f'box-shadow:0 1px 6px rgba(0,0,0,0.05);height:100%;">'
-        f'<p style="color:#94A3B8;font-size:10px;font-weight:700;'
+        f'<p style="color:#5E6472;font-size:10px;font-weight:700;'
         f'letter-spacing:1px;text-transform:uppercase;margin:0 0 8px;">'
         f'{ico_html}{label}</p>'
-        f'<p style="color:#1E293B;font-size:26px;font-weight:800;margin:0;line-height:1;">'
+        f'<p style="color:#23022E;font-size:26px;font-weight:800;margin:0;line-height:1;">'
         f'{value}</p>{sub_html}</div>'
     )
 
 def section_head(title, subtitle=""):
-    sub = f'<p style="color:#94A3B8;font-size:12px;margin:3px 0 0;">{subtitle}</p>' if subtitle else ""
+    sub = f'<p style="color:#5E6472;font-size:12px;margin:3px 0 0;">{subtitle}</p>' if subtitle else ""
     return (f'<div style="margin:20px 0 12px;">' +
-            f'<h3 style="color:#1E293B;font-size:16px;font-weight:700;margin:0;">{title}</h3>' +
+            f'<h3 style="color:#23022E;font-size:16px;font-weight:700;margin:0;">{title}</h3>' +
             sub + "</div>")
 
-st.markdown("""
-<style>
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
 
-* { font-family: 'Inter', sans-serif !important; box-sizing: border-box; }
-
-/* Background */
-[data-testid="stAppViewContainer"] > .main,
-[data-testid="stAppViewContainer"] { background: #F8FAFC !important; }
-[data-testid="block-container"] { padding-top: 1rem !important; }
-
-/* Sidebar */
-[data-testid="stSidebar"] { background: #FFFFFF !important; border-right: 1px solid #E2E8F0 !important; }
-
-/* Tabs */
-.stTabs [data-baseweb="tab-list"] {
-    background: #EEF2FF !important; padding: 4px !important; border-radius: 12px !important; gap: 2px !important;
-}
-.stTabs [data-baseweb="tab"] {
-    border-radius: 9px !important; padding: 8px 16px !important; color: #64748B !important;
-    font-weight: 600 !important; font-size: 13px !important; border: none !important;
-}
-.stTabs [aria-selected="true"] {
-    background: #6366F1 !important; color: #FFFFFF !important;
-    box-shadow: 0 2px 8px rgba(99,102,241,0.3) !important;
-}
-
-/* Run button */
-.stButton > button[kind="primary"] {
-    background: linear-gradient(135deg, #6366F1, #8B5CF6) !important;
-    color: #fff !important; border: none !important; border-radius: 10px !important;
-    font-weight: 700 !important; font-size: 15px !important;
-    box-shadow: 0 4px 14px rgba(99,102,241,0.35) !important;
-    transition: all 0.2s !important;
-}
-.stButton > button[kind="primary"]:hover { transform: translateY(-1px) !important; box-shadow: 0 6px 20px rgba(99,102,241,0.5) !important; }
-
-/* Secondary buttons (type filter cards) */
-.stButton > button[kind="secondary"] {
-    border-radius: 10px !important; border: 1.5px solid #E2E8F0 !important;
-    background: #FFFFFF !important; color: #1E293B !important;
-    font-weight: 600 !important; font-size: 13px !important;
-    transition: all 0.15s !important; width: 100% !important;
-    text-align: left !important; padding: 12px 16px !important;
-}
-.stButton > button[kind="secondary"]:hover { border-color: #6366F1 !important; color: #6366F1 !important; }
-
-/* Download button */
-.stDownloadButton > button {
-    background: #EEF2FF !important; color: #6366F1 !important;
-    border: 1.5px solid #C7D2FE !important; border-radius: 10px !important; font-weight: 600 !important;
-}
-
-/* Inputs */
-input, textarea { background: #F8FAFC !important; border-radius: 8px !important; color: #1E293B !important; }
-
-/* Expanders */
-details { background: #FFFFFF !important; border: 1px solid #E2E8F0 !important; border-radius: 10px !important; }
-
-/* Dividers */
-hr { border-color: #E2E8F0 !important; }
-
-/* Success/info */
-.stSuccess { border-radius: 10px !important; }
-.stInfo    { border-radius: 10px !important; }
-</style>
-""", unsafe_allow_html=True)
-
-# ── Column-type metadata# ── Column-type metadata ──────────────────────────────────────────────────────
+# ── Column-type metadata ──────────────────────────────────────────────────────
 COL_TYPE_META = {
     "numeric":     {"icon": "🔢", "label": "Numeric",     "color": "#378ADD"},
     "date":        {"icon": "📅", "label": "Date",        "color": "#1D9E75"},
@@ -207,10 +170,10 @@ STATUSES   = ["PAID","PENDING","OVERDUE","CANCELLED","DRAFT",
 # ═══════════════════════════════════════════════════════════════════════════════
 with st.sidebar:
     st.markdown("""
-    <div style="background:#f5f3ff;border-radius:12px;padding:14px 16px;margin-bottom:12px;
-                border:1px solid #e0e7ff;">
-      <p style="color:#4f46e5;font-size:15px;font-weight:800;margin:0 0 4px 0;">⚙️ Configuration</p>
-      <p style="color:#64748b;font-size:12px;margin:0;">Adjust thresholds before running the pipeline</p>
+    <div style="background:#F5EEF0;border-radius:12px;padding:14px 16px;margin-bottom:12px;
+                border:1px solid #C79192;">
+      <p style="color:#915466;font-size:15px;font-weight:800;margin:0 0 4px 0;">⚙️ Configuration</p>
+      <p style="color:#5E6472;font-size:12px;margin:0;">Adjust thresholds before running the pipeline</p>
     </div>
     """, unsafe_allow_html=True)
 
@@ -222,7 +185,7 @@ with st.sidebar:
     dup_cols      = st.text_input("Duplicate key columns (;-separated, blank = all)", "")
 
     st.divider()
-    st.caption("Built by Akshay — Data Engineer · v2.1")
+    st.caption("Built by Akshay — Data Engineer · v2.3")
 
 CONFIG = {
     "null_fill_string":         null_fill_str,
@@ -684,27 +647,27 @@ def run_scoring(df: pd.DataFrame, col_mapping: dict) -> tuple:
 # APP HEADER
 # ═══════════════════════════════════════════════════════════════════════════════
 st.markdown("""
-<div style="background:linear-gradient(135deg,#EEF2FF 0%,#F5F3FF 100%);
+<div style="background:linear-gradient(135deg,#23022E 0%,#3D1040 100%);
             border-radius:16px;padding:24px 32px;margin-bottom:20px;
-            border:1.5px solid #E0E7FF;
-            box-shadow:0 2px 16px rgba(99,102,241,0.08);">
+            border:1.5px solid #915466;
+            box-shadow:0 4px 24px rgba(145,84,102,0.25);">
   <div style="display:flex;align-items:center;gap:20px;">
-    <div style="background:linear-gradient(135deg,#818cf8,#a78bfa);
+    <div style="background:linear-gradient(135deg,#915466,#C79192);
                 border-radius:16px;width:58px;height:58px;display:flex;
                 align-items:center;justify-content:center;font-size:28px;
-                box-shadow:0 4px 16px rgba(129,140,248,0.35);flex-shrink:0;">🔬</div>
+                box-shadow:0 4px 16px rgba(145,84,102,0.45);flex-shrink:0;">🔬</div>
     <div style="flex:1;">
-      <h1 style="color:#1e293b;margin:0;font-size:27px;font-weight:800;
+      <h1 style="color:#FDFFFF;margin:0;font-size:27px;font-weight:800;
                  letter-spacing:-0.5px;">DataQual AI</h1>
-      <p style="color:#64748b;margin:6px 0 0;font-size:13.5px;line-height:1.5;">
+      <p style="color:#C79192;margin:6px 0 0;font-size:13.5px;line-height:1.5;">
         Upload any dataset &nbsp;·&nbsp; AI detects issues instantly &nbsp;·&nbsp; Make confident decisions
       </p>
     </div>
     <div style="text-align:right;flex-shrink:0;">
-      <span style="background:#eef2ff;color:#6366f1;font-size:11px;font-weight:700;
+      <span style="background:#915466;color:#FDFFFF;font-size:11px;font-weight:700;
                    padding:6px 14px;border-radius:20px;letter-spacing:0.8px;
-                   border:1.5px solid #c7d2fe;">v2.3</span>
-      <p style="color:#94a3b8;font-size:10px;margin:6px 0 0;letter-spacing:0.5px;text-transform:uppercase;">Universal DQ Platform</p>
+                   border:1.5px solid #C79192;">v2.3</span>
+      <p style="color:#C79192;font-size:10px;margin:6px 0 0;letter-spacing:0.5px;text-transform:uppercase;">Universal DQ Platform</p>
     </div>
   </div>
 </div>
@@ -893,7 +856,7 @@ if "input_df" in st.session_state:
             )
             fig_null.update_traces(
                 texttemplate="%{y:.1f}%", textposition="outside",
-                textfont=dict(color="#1e293b", size=11),
+                textfont=dict(color="#23022E", size=11),
                 marker_line_width=0,
                 hovertemplate="<b>%{x}</b><br>%{y:.1f}% missing<extra></extra>",
             )
@@ -970,11 +933,11 @@ def build_story_banner(df_f: pd.DataFrame, col_mapping: dict) -> str:
 
     bullets_html = "".join(f'<li style="margin:7px 0;line-height:1.5">{b}</li>' for b in bullets)
     return f"""
-    <div style="background:#ffffff;border:1.5px solid #e0e7ff;border-left:5px solid {bdr};
+    <div style="background:#ffffff;border:1.5px solid #C79192;border-left:5px solid {bdr};
                 border-radius:14px;padding:20px 24px;margin-bottom:24px;
                 box-shadow:0 2px 12px rgba(0,0,0,0.04);">
-      <p style="margin:0 0 14px;font-size:15px;font-weight:700;color:#1e293b;">{headline}</p>
-      <ul style="margin:0;padding-left:20px;color:#475569;font-size:13.5px;line-height:1.9;">{bullets_html}</ul>
+      <p style="margin:0 0 14px;font-size:15px;font-weight:700;color:#23022E;">{headline}</p>
+      <ul style="margin:0;padding-left:20px;color:#5E6472;font-size:13.5px;line-height:1.9;">{bullets_html}</ul>
     </div>"""
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -988,8 +951,8 @@ if "scored_df" in st.session_state:
     st.divider()
     st.markdown("""
     <div style="margin:8px 0 20px;">
-      <h2 style="margin:0 0 4px;font-size:22px;font-weight:800;color:#1e293b;">📊 Your Data Report</h2>
-      <p style="color:#94a3b8;margin:0;font-size:13px;">Pipeline complete — here's what we found</p>
+      <h2 style="margin:0 0 4px;font-size:22px;font-weight:800;color:#23022E;">📊 Your Data Report</h2>
+      <p style="color:#5E6472;margin:0;font-size:13px;">Pipeline complete — here's what we found</p>
     </div>
     """, unsafe_allow_html=True)
 
@@ -1039,10 +1002,10 @@ if "scored_df" in st.session_state:
                     f'<div style="background:{bg_style};border-radius:12px;padding:16px 14px;' +
                     f'border:1px solid #E2E8F0;border-top:{border_style};' +
                     f'box-shadow:0 1px 6px rgba(0,0,0,0.05);cursor:pointer;margin-bottom:4px;">' +
-                    f'<p style="color:#94A3B8;font-size:10px;font-weight:700;' +
+                    f'<p style="color:#5E6472;font-size:10px;font-weight:700;' +
                     f'letter-spacing:1px;text-transform:uppercase;margin:0 0 6px;">' +
                     f'{meta["icon"]} {meta["label"]}</p>' +
-                    f'<p style="color:#1E293B;font-size:24px;font-weight:800;margin:0;">{cnt}</p>' +
+                    f'<p style="color:#23022E;font-size:24px;font-weight:800;margin:0;">{cnt}</p>' +
                     f'<p style="font-size:10px;color:{meta["color"]};margin:4px 0 0;font-weight:600;">' +
                     ('● Active' if is_active else '○ Click to filter') + "</p></div>",
                     unsafe_allow_html=True
@@ -1117,7 +1080,7 @@ if "scored_df" in st.session_state:
         score_color = "#22c55e" if avg_score>=85 else "#f59e0b" if avg_score>=65 else "#ef4444"
         k1,k2,k3,k4,k5 = st.columns(5)
         cards = [
-            ("Total Records",   f"{len(df_f):,}",                                 "in your dataset",    "#6366F1", "📁"),
+            ("Total Records",   f"{len(df_f):,}",                                 "in your dataset",    "#915466", "📁"),
             ("Quality Score",   f"{avg_score:.1f} / 100",                          "overall average",    score_color,"⭐"),
             ("Ready to Use",    f"{int((df_f['dq_score']>=99).sum()):,}",         "clean records",      "#22C55E", "✅"),
             ("Act Now",         f"{int((df_f['dq_severity']=='CRITICAL').sum()):,}","critical records", "#EF4444", "🔴"),
@@ -1144,7 +1107,7 @@ if "scored_df" in st.session_state:
                 textposition="outside",
                 marker_line_width=0,
                 hovertemplate="<b>%{x}</b><br>%{y:,} records<extra></extra>",
-                textfont_size=13, textfont_color="#1e293b",
+                textfont_size=13, textfont_color="#23022E",
             )
             fig_sev.update_layout(
                 **_chart_layout(height=320),
@@ -1170,7 +1133,7 @@ if "scored_df" in st.session_state:
             fig_grd.update_layout(
                 **_chart_layout(height=320, showlegend=True,
                                 legend=dict(orientation="h", y=-0.15,
-                                            font=dict(color="#64748b"))),
+                                            font=dict(color="#5E6472"))),
             )
             st.plotly_chart(fig_grd, use_container_width=True)
 
@@ -1181,11 +1144,11 @@ if "scored_df" in st.session_state:
             sev_label = {"CLEAN":"✅ Clean","LOW":"🟡 Low","MEDIUM":"🟠 Medium",
                          "HIGH":"🔶 High","CRITICAL":"🔴 Critical"}.get(clicked_sev, clicked_sev)
             st.markdown(f"""
-            <div style="background:#f5f3ff;border:1.5px solid #c7d2fe;border-radius:14px;
+            <div style="background:#F5EEF0;border:1.5px solid #C79192;border-radius:14px;
                         padding:16px 20px;margin:12px 0;">
-              <p style="color:#4f46e5;font-weight:700;font-size:15px;margin:0 0 4px;">
+              <p style="color:#915466;font-weight:700;font-size:15px;margin:0 0 4px;">
                 {sev_label} — {len(filtered_click):,} records</p>
-              <p style="color:#64748b;font-size:12px;margin:0;">
+              <p style="color:#5E6472;font-size:12px;margin:0;">
                 Click another bar to switch · Click same bar to deselect</p>
             </div>""", unsafe_allow_html=True)
             id_cols  = col_mapping.get("id_columns", [])
@@ -1205,16 +1168,16 @@ if "scored_df" in st.session_state:
         st.markdown(section_head("Overall Quality Score Distribution",
             "See how your records cluster across the 0–100 quality range"), unsafe_allow_html=True)
         fig_hist = px.histogram(df_f, x="dq_score", nbins=25,
-                                color_discrete_sequence=["#818cf8"],
+                                color_discrete_sequence=["#915466"],
                                 labels={"dq_score":"Quality Score"})
         fig_hist.update_traces(
             marker_line_width=0,
             hovertemplate="Score %{x}<br>%{y:,} records<extra></extra>",
         )
         fig_hist.add_vline(x=df_f["dq_score"].mean(), line_dash="dash",
-                           line_color="#6366f1", line_width=2,
+                           line_color="#915466", line_width=2,
                            annotation_text=f"Avg {df_f['dq_score'].mean():.0f}",
-                           annotation_font_color="#6366f1", annotation_position="top right")
+                           annotation_font_color="#915466", annotation_position="top right")
         fig_hist.update_layout(
             **_chart_layout(height=280),
             xaxis=dict(**_GRID_X, title="Quality Score (0–100)"),
@@ -1237,7 +1200,7 @@ if "scored_df" in st.session_state:
         weights = {"Missing Data":"20%","Format Accuracy":"25%","Value Accuracy":"35%",
                    "Data Consistency":"15%","Duplicate Check":"5%"}
         DIM_COLORS_MAP = {
-            "Missing Data":"#6366F1","Format Accuracy":"#0EA5E9",
+            "Missing Data":"#915466","Format Accuracy":"#0EA5E9",
             "Value Accuracy":"#10B981","Data Consistency":"#F59E0B","Duplicate Check":"#EF4444"
         }
         DIM_ICONS = {
@@ -1246,7 +1209,7 @@ if "scored_df" in st.session_state:
         }
         d1,d2,d3,d4,d5 = st.columns(5)
         for col_obj, (dim, avg) in zip([d1,d2,d3,d4,d5], dim_avgs.items()):
-            clr = DIM_COLORS_MAP.get(dim, "#6366F1")
+            clr = DIM_COLORS_MAP.get(dim, "#915466")
             ico = DIM_ICONS.get(dim, "📊")
             status = "✅ Good" if avg>=80 else ("⚠️ Needs work" if avg>=60 else "🔴 Critical")
             sub = f"{weights[dim]} weight · {status}"
@@ -1260,7 +1223,7 @@ if "scored_df" in st.session_state:
             "Weight":    list(weights.values()),
         }).sort_values("Score")
         PASTEL_DIMS = {
-            "Missing Data":"#818cf8","Format Accuracy":"#2dd4bf",
+            "Missing Data":"#915466","Format Accuracy":"#2dd4bf",
             "Value Accuracy":"#34d399","Data Consistency":"#fbbf24","Duplicate Check":"#fb7185",
         }
         fig_dim = px.bar(dim_df, x="Score", y="Dimension", orientation="h",
@@ -1269,7 +1232,7 @@ if "scored_df" in st.session_state:
         fig_dim.update_traces(
             texttemplate="  %{x:.0f}",
             textposition="outside",
-            textfont=dict(color="#1e293b", size=13, family="Inter"),
+            textfont=dict(color="#23022E", size=13, family="Inter"),
             marker_line_width=0,
             hovertemplate="<b>%{y}</b><br>Score: %{x:.1f}/100<br>Weight: %{customdata[0]}<extra></extra>",
         )
@@ -1280,8 +1243,8 @@ if "scored_df" in st.session_state:
             bargap=0.35,
         )
         # Add a vertical "target" line at 80
-        fig_dim.add_vline(x=80, line_dash="dot", line_color="#94a3b8", line_width=1.5,
-                          annotation_text="Target (80)", annotation_font_color="#94a3b8",
+        fig_dim.add_vline(x=80, line_dash="dot", line_color="#5E6472", line_width=1.5,
+                          annotation_text="Target (80)", annotation_font_color="#5E6472",
                           annotation_position="top right")
         st.plotly_chart(fig_dim, use_container_width=True)
 
@@ -1298,12 +1261,12 @@ if "scored_df" in st.session_state:
             iss_df["Dimension"] = iss_df["Issue"].str.extract(r"\[(\w+)\]")[0]
             iss_df["Label"]     = iss_df["Issue"].str.replace(r"\[\w+\] ","",regex=True)
             PASTEL_DIMS2 = {
-                "Missing Data":"#818cf8","Format Accuracy":"#2dd4bf",
+                "Missing Data":"#915466","Format Accuracy":"#2dd4bf",
                 "Value Accuracy":"#34d399","Data Consistency":"#fbbf24","Duplicate Check":"#fb7185",
             }
             fig_iss = px.bar(iss_df.sort_values("Count"), x="Count", y="Label",
                              orientation="h", color="Dimension",
-                             color_discrete_map={d: PASTEL_DIMS2.get(d,"#94a3b8")
+                             color_discrete_map={d: PASTEL_DIMS2.get(d,"#5E6472")
                                                  for d in iss_df["Dimension"].unique()},
                              text="Count")
             fig_iss.update_traces(
@@ -1314,7 +1277,7 @@ if "scored_df" in st.session_state:
             fig_iss.update_layout(
                 **_chart_layout(height=420, showlegend=True,
                                 legend=dict(orientation="h", y=1.08,
-                                            font=dict(color="#64748b", size=11))),
+                                            font=dict(color="#5E6472", size=11))),
                 xaxis=dict(**_GRID_X, title="Records affected"),
                 yaxis=dict(**_NO_GRID_Y),
                 bargap=0.3,
@@ -1525,7 +1488,7 @@ if "scored_df" in st.session_state:
                 st.caption("Each bar shows how many records fall at that risk level. Bars on the right need your attention.")
                 fig_iso = px.histogram(
                     df_f, x="isolation_score", nbins=40,
-                    color_discrete_sequence=["#818cf8"],
+                    color_discrete_sequence=["#915466"],
                     labels={"isolation_score": "AI Risk Score"},
                 )
                 fig_iso.update_traces(
@@ -1570,7 +1533,7 @@ if "scored_df" in st.session_state:
                     fig_iqr = px.bar(
                         iqr_df, x="Column", y="Outlier Rows",
                         color="Outlier Rows",
-                        color_continuous_scale=["#c7d2fe","#818cf8","#6366f1","#fb7185"],
+                        color_continuous_scale=["#C79192","#915466","#915466","#fb7185"],
                         labels={"Outlier Rows": "Records with unusual values"},
                     )
                     fig_iqr.update_traces(
