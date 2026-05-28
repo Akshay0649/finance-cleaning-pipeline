@@ -341,15 +341,65 @@ def parse_nlq(query: str, df: "pd.DataFrame", col_mapping: dict) -> dict:
 
     # ── 11. Top N ─────────────────────────────────────────────────────────────
     top_m = _re.search(r'top\s+(\d+)', q)
+    # Entity words: when "top N [entities]" refers to groups, not individual records
+    _ENTITY_WORDS = {
+        "companies","company","vendors","vendor","reps","rep","customers","customer",
+        "products","product","suppliers","supplier","teams","team","regions","region",
+        "departments","department","categories","category","channels","channel",
+        "accounts","account","clients","client","partners","partner",
+    }
     if top_m:
         limit = int(top_m.group(1))
-        # Sort by the numeric column most relevant to the query, default dq_score
-        if num_m and matched_col and matched_col in df.columns:
-            sort_col = matched_col
-            sort_asc = False   # "top 5 invoices with amount > X" → highest amount first
+        toks_set = set(_tokens(q))
+        entity_hit = toks_set & _ENTITY_WORDS
+        if entity_hit and intent != "aggregate":
+            # "Top 5 companies by revenue" → aggregate by best-matching cat col
+            entity_word = entity_hit.pop()
+            grp_col = next(
+                (c for c in cat_cols if c in df.columns and
+                 any(h in c.lower() for h in [entity_word, entity_word.rstrip("s")])),
+                None
+            )
+            if not grp_col and cat_cols:
+                grp_col = next((c for c in cat_cols if c in df.columns), None)
+            if grp_col:
+                # Determine metric to aggregate: use mentioned numeric col or dq_score
+                metric_col = (matched_col if (num_m and matched_col and
+                               matched_col in df.columns and
+                               pd.api.types.is_numeric_dtype(df[matched_col]))
+                              else "dq_score")
+                intent = "aggregate"
+                agg_df = (
+                    df[mask].groupby(grp_col, dropna=False)
+                    .agg(
+                        records=(metric_col, "count"),
+                        avg_metric=(metric_col, "mean"),
+                        avg_score=("dq_score", "mean"),
+                        critical=("dq_severity", lambda s: (s=="CRITICAL").sum()),
+                    )
+                    .reset_index()
+                    .rename(columns={
+                        grp_col: "Value",
+                        "records": "Records",
+                        "avg_metric": f"Avg {metric_col.replace('_',' ').title()}",
+                        "avg_score": "Avg DQ Score",
+                        "critical": "Critical Issues",
+                    })
+                    .sort_values(f"Avg {metric_col.replace('_',' ').title()}", ascending=False)
+                    .head(limit)
+                )
+                agg_df[f"Avg {metric_col.replace('_',' ').title()}"] = (
+                    agg_df[f"Avg {metric_col.replace('_',' ').title()}"].round(1))
+                summary_parts.append(f"top {limit} {entity_word} by {metric_col.replace('_',' ')}")
+                limit = None  # already sliced in agg_df
         else:
-            sort_col = "dq_score"
-            sort_asc = True
+            # Records-based top N — sort by relevant numeric col or dq_score
+            if num_m and matched_col and matched_col in df.columns:
+                sort_col = matched_col
+                sort_asc = False
+            else:
+                sort_col = "dq_score"
+                sort_asc = True
 
     # ── 12. Sort direction hints ──────────────────────────────────────────────
     if any(w in q for w in ("worst","lowest","lowest score","bad")):
@@ -661,10 +711,40 @@ def generate_demo(n: int = 300, seed: int = 42, domain: str = "finance") -> pd.D
             })
 
     df = pd.DataFrame(rows)
-    # Inject realistic duplicates (~5-8%)
-    n_dupes = max(5, int(len(df) * random.uniform(0.05, 0.08)))
+
+    # ── Guarantee dirty data: inject known-bad rows ───────────────────────────
+    # 1. Duplicates (~7%)
+    n_dupes = max(8, int(len(df) * 0.07))
     dupes   = df.sample(min(n_dupes, len(df)), random_state=seed+1).copy()
-    df      = pd.concat([df, dupes], ignore_index=True).sample(frac=1, random_state=seed).reset_index(drop=True)
+
+    # 2. All-null rows (2% of n) — forces completeness failures
+    null_rows = pd.DataFrame([{c: None for c in df.columns}
+                               for _ in range(max(3, n // 50))])
+
+    # 3. Extreme-value rows — forces outlier/accuracy failures
+    extreme_rows = df.sample(min(5, len(df)), random_state=seed+2).copy()
+    num_cols = [c for c in df.columns if df[c].dtype in [float, int]
+                and c not in [df.columns[0]]]
+    for col in num_cols[:2]:
+        extreme_rows[col] = extreme_rows[col] * 999  # blow out the range
+
+    # 4. Empty-string rows for text columns
+    blank_rows = df.sample(min(4, len(df)), random_state=seed+3).copy()
+    str_cols = [c for c in df.columns if df[c].dtype == object]
+    for col in str_cols[:3]:
+        blank_rows[col] = random.choice(["", "  ", "NULL", "N/A", "UNKNOWN", None])
+
+    # 5. Contradictory / impossible values
+    bad_rows = df.sample(min(4, len(df)), random_state=seed+4).copy()
+    for col in num_cols[:1]:
+        bad_rows[col] = -abs(bad_rows[col]) * 10  # negative where impossible
+
+    df = (pd.concat([df, dupes, null_rows, extreme_rows, blank_rows, bad_rows],
+                    ignore_index=True)
+            .sample(frac=1, random_state=seed)
+            .reset_index(drop=True))
+
+    # Reset ID column to sequential
     first_col = df.columns[0]
     df[first_col] = range(1, len(df)+1)
     return df
@@ -1143,6 +1223,15 @@ if gen_btn:
     st.session_state.pop("detected_types", None)
     st.session_state["_file_key"]  = "demo"
     st.success(f"{demo_domain} demo ready — {len(st.session_state['input_df']):,} rows generated.")
+    st.markdown("""
+    <div style="background:#F5EEF0;border-left:4px solid #915466;border-radius:10px;
+                padding:12px 16px;margin-top:8px;font-size:13px;color:#23022E;">
+      <strong>What this data contains:</strong> intentional nulls · duplicates ·
+      extreme values · bad formats · blank strings — ready to stress-test the pipeline.<br>
+      <strong>Next:</strong> scroll down → click <strong>🚀 Analyse My Data</strong> →
+      then open the <strong>💬 Ask Your Data</strong> tab to explore results.
+    </div>
+    """, unsafe_allow_html=True)
 
 if uploaded_file is not None:
     file_key = f"{uploaded_file.name}_{uploaded_file.size}"
@@ -2241,12 +2330,12 @@ if "scored_df" in st.session_state:
                                 labels={"x": "", "y": "Records"},
                                 text=sev_counts.values,
                             )
-                            fig_sev_r.update_traces(textposition="outside", showlegend=False)
+                            fig_sev_r.update_traces(textposition="outside")
                             fig_sev_r.update_layout(
                                 **_chart_layout(height=240),
                                 xaxis=dict(**_GRID_X, title=""),
                                 yaxis=dict(**_GRID_Y, title="Records"),
-                                bargap=0.3, showlegend=False,
+                                bargap=0.3,
                             )
                             st.plotly_chart(fig_sev_r, use_container_width=True)
                         else:
