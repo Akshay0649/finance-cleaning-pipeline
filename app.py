@@ -259,25 +259,30 @@ def parse_nlq(query: str, df: "pd.DataFrame", col_mapping: dict) -> dict:
                 summary_parts.append(f"{_DIM_HUMAN[col]} score < {thresh:.0f}")
 
     # ── 8. Numeric column value filter  (amount > 50000, price < 100) ─────────
+    # Expanded regex: captures "higher than", "more than", "lower than" etc.
     num_m = _re.search(
-        r'([\w_]+)\s*(>|>=|<|<=|=|==|above|below|over|under|greater than|less than)\s*([\d,\.]+)', q)
+        r'([\w_]+(?:\s+[\w_]+)?)\s*(>=|<=|>|<|=|==|above|below|over|under|'
+        r'higher than|lower than|more than|less than|greater than|'
+        r'bigger than|smaller than|exceeds|exceed)\s*([\d,\.]+)', q)
     if num_m:
-        col_hint = num_m.group(1).replace(" ","_")
-        op_str   = num_m.group(2)
-        val      = float(num_m.group(3).replace(",",""))
-        # fuzzy-match col_hint to actual df columns
+        col_hint    = num_m.group(1).strip().replace(" ","_")
+        op_str      = num_m.group(2).strip()
+        val         = float(num_m.group(3).replace(",",""))
         matched_col = next(
             (c for c in df.columns if col_hint in c.lower() or c.lower() in col_hint), None)
         if matched_col and pd.api.types.is_numeric_dtype(df[matched_col]):
-            op_map = {">":">",">=":">=","<":"<","<=":"<=","=":"==","==":"==",
-                      "above":">","over":">","greater than":">",
-                      "below":"<","under":"<","less than":"<"}
+            op_map = {
+                ">":">",">=":">=","<":"<","<=":"<=","=":"==","==":"==",
+                "above":">","over":">","greater than":">",
+                "higher than":">","more than":">","bigger than":">","exceeds":">","exceed":">",
+                "below":"<","under":"<","less than":"<",
+                "lower than":"<","smaller than":"<",
+            }
             op = op_map.get(op_str, ">")
-            cond = df[matched_col].dropna()
-            if op == ">":   mask &= df[matched_col].fillna(-np.inf) > val
+            if op == ">":    mask &= df[matched_col].fillna(-np.inf) > val
             elif op == ">=": mask &= df[matched_col].fillna(-np.inf) >= val
-            elif op == "<":  mask &= df[matched_col].fillna(np.inf) < val
-            elif op == "<=": mask &= df[matched_col].fillna(np.inf) <= val
+            elif op == "<":  mask &= df[matched_col].fillna(np.inf)  < val
+            elif op == "<=": mask &= df[matched_col].fillna(np.inf)  <= val
             elif op == "==": mask &= df[matched_col] == val
             summary_parts.append(f"{matched_col} {op} {val:,.0f}")
 
@@ -296,13 +301,24 @@ def parse_nlq(query: str, df: "pd.DataFrame", col_mapping: dict) -> dict:
                 summary_parts.append(f"{matched_col} contains '{val_hint}'")
 
     # ── 10. Aggregation: which column has most issues ──────────────────────────
-    agg_words = {"which","who","top","worst","best","most","fewest","rank","breakdown","by","group"}
-    if any(w in toks for w in agg_words):
-        grp_col = next((c for c in cat_cols if c in df.columns and
-                        any(hint in q for hint in [c.lower(), c.split("_")[0].lower()])), None)
-        if not grp_col and cat_cols:
-            # default: first categorical column
-            grp_col = next((c for c in cat_cols if c in df.columns), None)
+    # Only trigger on explicit grouping language — NOT on "top/worst/best" (those = limit)
+    AGG_TRIGGERS = {"which","who","breakdown","group"}
+    # Check raw query q (not toks) — "which/who" are stripped by _STOPWORDS
+    agg_phrase   = any(w in q.split() for w in AGG_TRIGGERS)
+    # Also catch "by <col>" pattern explicitly
+    by_m = _re.search(r'\bby\s+([\w_]+)', q)
+    if agg_phrase or (by_m and not _re.search(r'top\s+\d+', q)):
+        grp_col = None
+        # If "by <col>" explicitly stated, try to match that column
+        if by_m:
+            by_hint = by_m.group(1)
+            grp_col = next((c for c in cat_cols if c in df.columns and
+                            (by_hint in c.lower() or c.lower() in by_hint)), None)
+        # Fallback: find a categorical column mentioned in the query
+        if not grp_col:
+            grp_col = next((c for c in cat_cols if c in df.columns and
+                            any(hint in q for hint in [c.lower(), c.split("_")[0].lower()])), None)
+        # Only aggregate if we found an explicit group column — never silently default
         if grp_col:
             intent = "aggregate"
             agg_df = (
@@ -327,8 +343,13 @@ def parse_nlq(query: str, df: "pd.DataFrame", col_mapping: dict) -> dict:
     top_m = _re.search(r'top\s+(\d+)', q)
     if top_m:
         limit = int(top_m.group(1))
-        sort_col = "dq_score"
-        sort_asc = True
+        # Sort by the numeric column most relevant to the query, default dq_score
+        if num_m and matched_col and matched_col in df.columns:
+            sort_col = matched_col
+            sort_asc = False   # "top 5 invoices with amount > X" → highest amount first
+        else:
+            sort_col = "dq_score"
+            sort_asc = True
 
     # ── 12. Sort direction hints ──────────────────────────────────────────────
     if any(w in q for w in ("worst","lowest","lowest score","bad")):
@@ -412,13 +433,62 @@ DIM_COLORS = {
 PLACEHOLDER_VALUES = {"UNKNOWN", "N/A", "NA", "NONE", "", "NULL", "NAN", "-"}
 
 # kept for demo generator only
-VENDORS    = ["Accenture Ltd","  KPMG Advisory  ","Deloitte & Touche","ernst & young",
-              "PwC Services","GARTNER INC","Infosys BPO","Wipro Technologies",
-              "IBM Global  ","Capgemini SE","  Oracle Corp","SAP AG",
-              "Microsoft Azure","AWS Finance","Cognizant Tech",None,"N/A","UNKNOWN VENDOR"]
-CURRENCIES = ["USD","EUR","GBP","AUD","INR","XYZ","ZZZ","usd","Eur",None]
-STATUSES   = ["PAID","PENDING","OVERDUE","CANCELLED","DRAFT",
-              "paid","  Pending  ","overdue","settled","VOID",None,""]
+# ── Multi-domain demo data constants ─────────────────────────────────────────
+DEMO_DOMAINS = {
+    "💰 Finance / Invoices":    "finance",
+    "📈 Sales / CRM":           "sales",
+    "👥 HR / People":           "hr",
+    "🛒 E-commerce / Orders":   "ecommerce",
+    "🚚 Supply Chain":          "supply_chain",
+    "📱 Product Analytics":     "product",
+}
+
+# Finance
+_VENDORS    = ["Accenture Ltd","  KPMG Advisory  ","Deloitte & Touche","ernst & young",
+               "PwC Services","GARTNER INC","Infosys BPO","Wipro Technologies",
+               "IBM Global  ","Capgemini SE","  Oracle Corp","SAP AG",None,"N/A","UNKNOWN"]
+_CURRENCIES = ["USD","EUR","GBP","AUD","INR","XYZ","usd","Eur",None]
+_INV_STATUS = ["PAID","PENDING","OVERDUE","CANCELLED","DRAFT","paid","  Pending  ",None,""]
+
+# Sales / CRM
+_SALES_REPS   = ["Alice Johnson","Bob Smith","  carol white  ","DAVID LEE","Emma Brown",
+                 "Frank Zhang","grace kim","Hina Patel",None,"UNKNOWN REP"]
+_COMPANIES    = ["TechCorp Inc","  Globex Ltd","Initech","Umbrella Corp","Hooli",
+                 "Pied Piper","Initrode","ACME Corp","Dunder Mifflin",None]
+_DEAL_STAGES  = ["Prospecting","Qualification","Proposal","Negotiation","Closed Won",
+                 "Closed Lost","closed won","PROPOSAL","discovery",None]
+_LEAD_SOURCES = ["Website","Cold Call","Referral","LinkedIn","Trade Show","EMAIL","website",None]
+
+# HR
+_DEPARTMENTS  = ["Engineering","Marketing","Sales","Finance","HR","Operations",
+                 "engineering","MARKETING","Legal",None]
+_JOB_TITLES   = ["Software Engineer","Senior Engineer","Manager","Director","Analyst",
+                 "Associate","VP","  intern  ","CONTRACTOR",None]
+_EMP_STATUS   = ["Active","Inactive","On Leave","Terminated","active","ACTIVE",None,""]
+_LOCATIONS    = ["New York","London","Bangalore","Singapore","Sydney","  Berlin  ","REMOTE",None]
+
+# E-commerce
+_PRODUCTS     = ["Laptop Pro 15","Wireless Mouse","USB-C Hub","Mechanical Keyboard",
+                 "Monitor 27in","Webcam HD","laptop pro 15","  USB-C Hub  ",None]
+_CATEGORIES   = ["Electronics","Accessories","Peripherals","Storage","Networking","electronics",None]
+_ORDER_STATUS = ["Delivered","Shipped","Processing","Cancelled","Returned",
+                 "delivered","SHIPPED","pending",None,""]
+_PAYMENT_METHODS = ["Credit Card","PayPal","Bank Transfer","Crypto","credit card","PAYPAL",None]
+
+# Supply Chain
+_SUPPLIERS    = ["FastShip Co","  Global Freight  ","QuickLog","PrimeMover","CargoExpress",
+                 "fastship co","QUICKLOG",None,"UNKNOWN SUPPLIER"]
+_WAREHOUSES   = ["WH-EAST","WH-WEST","WH-NORTH","WH-SOUTH","WH-CENTRAL","wh-east",None]
+_SHIP_STATUS  = ["On Time","Delayed","In Transit","Delivered","Lost","on time","DELAYED",None,""]
+_CARRIERS     = ["FedEx","DHL","UPS","USPS","DPD","fedex","  DHL  ",None]
+
+# Product Analytics
+_FEATURES     = ["Dashboard","Search","Export","Upload","Settings","Notifications",
+                 "Report Builder","API","dashboard","SEARCH",None]
+_EVENTS       = ["page_view","click","form_submit","download","signup","login",
+                 "PAGE_VIEW","Click","form submit",None,""]
+_PLATFORMS    = ["web","mobile_ios","mobile_android","desktop","WEB","Mobile",None]
+_USER_TIERS   = ["free","pro","enterprise","Free","PRO","ENTERPRISE",None,""]
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -461,37 +531,142 @@ def _rnd_date(start, end):
     return None if fmt == "" else d.strftime(fmt)
 
 @st.cache_data(show_spinner=False)
-def generate_demo(n: int = 300, seed: int = 42) -> pd.DataFrame:
+@st.cache_data(show_spinner=False)
+def generate_demo(n: int = 300, seed: int = 42, domain: str = "finance") -> pd.DataFrame:
+    """Generate realistic messy demo data for the chosen domain.
+    seed — same value = same dataset every run (reproducible). Change it for fresh data.
+    """
     random.seed(seed); np.random.seed(seed)
     s, e = date(2023, 1, 1), date(2025, 12, 31)
     rows = []
-    for i in range(1, n + 1):
-        vendor = random.choice(VENDORS)
-        inv    = f"INV-{random.randint(1000,9999)}"
-        amt    = round(random.uniform(-500, 250_000), 2)
-        if random.random() < 0.05: amt = round(random.uniform(1_000_000, 15_000_000), 2)
-        if random.random() < 0.08: amt = -abs(amt)
-        tax   = round(amt * random.uniform(0.05, 0.18), 2) if amt > 0 else None
-        total = round(amt + (tax or 0), 2)
-        rows.append({
-            "invoice_id":     i,
-            "invoice_number": inv,
-            "vendor_name":    vendor,
-            "invoice_date":   _rnd_date(s, e),
-            "due_date":       _rnd_date(s, e),
-            "payment_date":   _rnd_date(s, e) if random.random() > 0.35 else None,
-            "amount":         amt if random.random() > 0.05 else None,
-            "tax_amount":     tax,
-            "total_amount":   total if random.random() > 0.05 else None,
-            "currency":       random.choice(CURRENCIES),
-            "status":         random.choice(STATUSES),
-            "department":     random.choice(["Finance", "IT", "HR", "Ops", None]),
-            "cost_centre":    random.choice(["CC100", "CC200", "CC300", "CC999", None]),
-        })
-    df    = pd.DataFrame(rows)
-    dupes = df.sample(20, random_state=7).copy()
-    df    = pd.concat([df, dupes], ignore_index=True).sample(frac=1, random_state=42).reset_index(drop=True)
-    df["invoice_id"] = range(1, len(df) + 1)
+
+    if domain == "finance":
+        for i in range(1, n + 1):
+            amt = round(random.uniform(-500, 250_000), 2)
+            if random.random() < 0.05: amt = round(random.uniform(1_000_000, 15_000_000), 2)
+            if random.random() < 0.08: amt = -abs(amt)
+            tax = round(amt * random.uniform(0.05, 0.18), 2) if amt > 0 else None
+            rows.append({
+                "invoice_id":     i,
+                "invoice_number": f"INV-{random.randint(1000,9999)}",
+                "vendor_name":    random.choice(_VENDORS),
+                "invoice_date":   _rnd_date(s, e),
+                "due_date":       _rnd_date(s, e),
+                "payment_date":   _rnd_date(s, e) if random.random() > 0.35 else None,
+                "amount":         amt if random.random() > 0.05 else None,
+                "tax_amount":     tax,
+                "total_amount":   round(amt + (tax or 0), 2) if random.random() > 0.05 else None,
+                "currency":       random.choice(_CURRENCIES),
+                "status":         random.choice(_INV_STATUS),
+                "department":     random.choice(["Finance","IT","HR","Operations",None]),
+                "cost_centre":    random.choice(["CC100","CC200","CC300","CC999",None]),
+            })
+
+    elif domain == "sales":
+        for i in range(1, n + 1):
+            deal_val = round(random.uniform(1_000, 500_000), 2)
+            rows.append({
+                "deal_id":            f"DEAL-{i:05d}",
+                "company_name":       random.choice(_COMPANIES),
+                "sales_rep":          random.choice(_SALES_REPS),
+                "deal_stage":         random.choice(_DEAL_STAGES),
+                "deal_value":         deal_val if random.random() > 0.07 else None,
+                "close_probability":  round(random.uniform(0,100)) if random.random() > 0.1 else None,
+                "expected_close_date":_rnd_date(s, e),
+                "created_date":       _rnd_date(s, e),
+                "lead_source":        random.choice(_LEAD_SOURCES),
+                "num_employees":      random.choice([10,50,200,500,1000,5000,None,0,-1]),
+                "annual_revenue":     round(random.uniform(100_000,50_000_000),2) if random.random()>0.15 else None,
+                "currency":           random.choice(_CURRENCIES),
+                "region":             random.choice(["North America","Europe","APAC","LATAM","MEA",None]),
+            })
+
+    elif domain == "hr":
+        for i in range(1, n + 1):
+            salary = round(random.uniform(30_000, 250_000), 2)
+            rows.append({
+                "employee_id":      f"EMP-{i:05d}",
+                "full_name":        random.choice(["  John Smith  ","Jane Doe","ROBERT JOHNSON",
+                                                    "Maria Garcia","Wei Zhang","Priya Sharma",
+                                                    "james wilson","Emily Brown",None]),
+                "department":       random.choice(_DEPARTMENTS),
+                "job_title":        random.choice(_JOB_TITLES),
+                "hire_date":        _rnd_date(date(2010,1,1), date(2025,12,31)),
+                "termination_date": _rnd_date(s, e) if random.random() < 0.12 else None,
+                "base_salary":      salary if random.random() > 0.06 else None,
+                "bonus_pct":        round(random.uniform(0,30),1) if random.random()>0.2 else None,
+                "location":         random.choice(_LOCATIONS),
+                "status":           random.choice(_EMP_STATUS),
+                "performance_rating": random.choice([1,2,3,4,5,None,0,6,"N/A"]),
+                "manager_id":       f"EMP-{random.randint(1,50):05d}" if random.random()>0.1 else None,
+            })
+
+    elif domain == "ecommerce":
+        for i in range(1, n + 1):
+            qty   = random.choice([1,1,1,2,3,5,10,0,-1,None])
+            price = round(random.uniform(5, 2_000), 2)
+            rows.append({
+                "order_id":       f"ORD-{i:06d}",
+                "customer_id":    f"CUST-{random.randint(1,int(n*0.6)):05d}",
+                "product_name":   random.choice(_PRODUCTS),
+                "category":       random.choice(_CATEGORIES),
+                "order_date":     _rnd_date(s, e),
+                "ship_date":      _rnd_date(s, e) if random.random()>0.15 else None,
+                "quantity":       qty,
+                "unit_price":     price if random.random()>0.05 else None,
+                "total_price":    round((qty or 0)*price,2) if qty and price and random.random()>0.08 else None,
+                "discount_pct":   round(random.uniform(0,50),1) if random.random()>0.6 else 0,
+                "order_status":   random.choice(_ORDER_STATUS),
+                "payment_method": random.choice(_PAYMENT_METHODS),
+                "country":        random.choice(["US","UK","DE","IN","AU","CA","SG","FR","  US  ",None]),
+            })
+
+    elif domain == "supply_chain":
+        for i in range(1, n + 1):
+            qty_ord = random.randint(10, 5000)
+            rows.append({
+                "shipment_id":          f"SHP-{i:06d}",
+                "supplier_name":        random.choice(_SUPPLIERS),
+                "carrier":              random.choice(_CARRIERS),
+                "warehouse":            random.choice(_WAREHOUSES),
+                "order_date":           _rnd_date(s, e),
+                "expected_date":        _rnd_date(s, e),
+                "actual_delivery_date": _rnd_date(s, e) if random.random()>0.25 else None,
+                "quantity_ordered":     qty_ord,
+                "quantity_received":    qty_ord-random.randint(0,50) if random.random()>0.1 else None,
+                "unit_cost":            round(random.uniform(0.5,500),2) if random.random()>0.06 else None,
+                "total_cost":           round(qty_ord*random.uniform(0.5,500),2) if random.random()>0.08 else None,
+                "shipment_status":      random.choice(_SHIP_STATUS),
+                "country_origin":       random.choice(["China","India","Germany","USA","Vietnam","  China  ",None]),
+            })
+
+    elif domain == "product":
+        session_ids = [f"sess_{random.randint(100000,999999)}" for _ in range(max(50, n//3))]
+        user_ids    = [f"usr_{random.randint(10000,99999)}"    for _ in range(max(30, n//4))]
+        for i in range(1, n + 1):
+            dur = random.randint(1, 900) if random.random()>0.1 else None
+            rows.append({
+                "event_id":           f"EVT-{i:07d}",
+                "user_id":            random.choice(user_ids + [None]*3),
+                "session_id":         random.choice(session_ids),
+                "event_type":         random.choice(_EVENTS),
+                "feature_name":       random.choice(_FEATURES),
+                "platform":           random.choice(_PLATFORMS),
+                "event_timestamp":    _rnd_date(s, e),
+                "session_duration_sec": dur,
+                "page_load_ms":       random.randint(50,8000) if random.random()>0.12 else None,
+                "user_tier":          random.choice(_USER_TIERS),
+                "country":            random.choice(["US","UK","IN","DE","BR","FR","CA",None,"XX"]),
+                "is_conversion":      random.choice([True,False,None,"true","FALSE"]),
+            })
+
+    df = pd.DataFrame(rows)
+    # Inject realistic duplicates (~5-8%)
+    n_dupes = max(5, int(len(df) * random.uniform(0.05, 0.08)))
+    dupes   = df.sample(min(n_dupes, len(df)), random_state=seed+1).copy()
+    df      = pd.concat([df, dupes], ignore_index=True).sample(frac=1, random_state=seed).reset_index(drop=True)
+    first_col = df.columns[0]
+    df[first_col] = range(1, len(df)+1)
     return df
 
 
@@ -943,16 +1118,31 @@ with src_col1:
     )
 with src_col2:
     st.markdown("<br>", unsafe_allow_html=True)
-    n_demo    = st.number_input("Demo rows", 100, 1000, 300, 50)
-    demo_seed = st.number_input("Seed", value=42, step=1)
-    gen_btn   = st.button("🎲 Generate demo data", use_container_width=True)
+    demo_domain = st.selectbox(
+        "Data domain",
+        options=list(DEMO_DOMAINS.keys()),
+        index=0,
+        help="Choose what kind of data to generate. Each domain has realistic columns and intentional data quality issues.",
+    )
+    demo_cols = st.columns(2)
+    with demo_cols[0]:
+        n_demo = st.number_input("Rows", 100, 2000, 300, 50)
+    with demo_cols[1]:
+        demo_seed = st.number_input(
+            "Seed",
+            value=42, step=1,
+            help="Same seed = same dataset every run (great for demos). Change it to get fresh random data.",
+        )
+    gen_btn = st.button("🎲 Generate demo data", use_container_width=True, type="primary")
 
 if gen_btn:
-    st.session_state["input_df"] = generate_demo(int(n_demo), int(demo_seed))
+    domain_key = DEMO_DOMAINS[demo_domain]
+    st.session_state["input_df"]   = generate_demo(int(n_demo), int(demo_seed), domain_key)
+    st.session_state["demo_domain_label"] = demo_domain
     st.session_state.pop("scored_df", None)
     st.session_state.pop("detected_types", None)
-    st.session_state["_file_key"] = "demo"
-    st.success(f"Demo dataset ready — {len(st.session_state['input_df'])} rows")
+    st.session_state["_file_key"]  = "demo"
+    st.success(f"{demo_domain} demo ready — {len(st.session_state['input_df']):,} rows generated.")
 
 if uploaded_file is not None:
     file_key = f"{uploaded_file.name}_{uploaded_file.size}"
