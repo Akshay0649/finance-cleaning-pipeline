@@ -1127,7 +1127,21 @@ if "input_df" in st.session_state:
     st.divider()
 
     # ─── Run Pipeline ────────────────────────────────────────────────────────
-    if st.button("🚀 Analyse My Data", type="primary", use_container_width=True):
+    st.markdown("""
+    <div style="background:linear-gradient(135deg,#23022E,#3D1040);border-radius:14px;
+                padding:20px 28px;margin-bottom:16px;border:1px solid #915466;
+                text-align:center;">
+      <p style="color:#C79192;font-size:12px;font-weight:700;letter-spacing:1px;
+                text-transform:uppercase;margin:0 0 6px;">Ready to analyse?</p>
+      <p style="color:#FDFFFF;font-size:15px;font-weight:600;margin:0 0 4px;">
+        Run the full AI quality pipeline on your data
+      </p>
+      <p style="color:#C79192;font-size:12px;margin:0;">
+        Cleaning · Scoring · Anomaly Detection — all in one click
+      </p>
+    </div>
+    """, unsafe_allow_html=True)
+    if st.button("🚀 Analyse My Data — Run Full Pipeline", type="primary", use_container_width=True):
         with st.spinner("Cleaning data…"):
             cleaned_df, clean_stats = run_cleaning(input_df, col_mapping)
         with st.spinner("Scoring across 5 dimensions…"):
@@ -1139,6 +1153,7 @@ if "input_df" in st.session_state:
         st.session_state["score_stats"] = score_stats
         n_anom = int(scored_df.get("is_anomaly", pd.Series(dtype=bool)).sum())
         st.success(f"Pipeline complete — {len(scored_df):,} records scored · {n_anom} anomalies detected.")
+        st.info("💬 **Next step:** Click the **Ask Your Data** tab (second tab) to query your results in plain English.")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1226,8 +1241,43 @@ if "scored_df" in st.session_state:
         df["dq_score"].between(score_range[0], score_range[1])
     ].copy()
 
+
+    # ── Tab persistence — keep active tab across reruns ─────────────────────
+    st.markdown("""
+<script>
+(function() {
+  function restoreTab() {
+    var saved = sessionStorage.getItem("dq_active_tab");
+    if (!saved) return;
+    var tabs = document.querySelectorAll('[data-baseweb="tab"]');
+    var idx = parseInt(saved, 10);
+    if (tabs && tabs[idx]) { tabs[idx].click(); }
+  }
+  function attachListeners() {
+    var tabs = document.querySelectorAll('[data-baseweb="tab"]');
+    tabs.forEach(function(tab, idx) {
+      tab.addEventListener("click", function() {
+        sessionStorage.setItem("dq_active_tab", idx);
+      });
+    });
+  }
+  var tries = 0;
+  var timer = setInterval(function() {
+    var tabs = document.querySelectorAll('[data-baseweb="tab"]');
+    if (tabs.length > 0 || tries > 20) {
+      clearInterval(timer);
+      attachListeners();
+      restoreTab();
+    }
+    tries++;
+  }, 200);
+})();
+</script>
+""", unsafe_allow_html=True)
+
     tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9 = st.tabs([
         "🔍 Profile",
+        "💬 Ask Your Data",
         "📊 Dashboard",
         "📐 Dimension Analysis",
         "📋 Record Explorer",
@@ -1235,7 +1285,6 @@ if "scored_df" in st.session_state:
         "📈 Statistics",
         "⬇️ Export",
         "🚨 Risk Signals",
-        "💬 Ask Your Data",
     ])
 
     # =========================================================================
@@ -1319,7 +1368,7 @@ if "scored_df" in st.session_state:
     # =========================================================================
     # TAB 2 — DASHBOARD
     # =========================================================================
-    with tab2:
+    with tab3:
         # ── Story Banner ─────────────────────────────────────────────────────
         banner_html = build_story_banner(df_f, col_mapping)
         if banner_html:
@@ -1474,7 +1523,7 @@ if "scored_df" in st.session_state:
     # =========================================================================
     # TAB 3 — DIMENSION ANALYSIS
     # =========================================================================
-    with tab3:
+    with tab4:
         dim_avgs = {
             "Missing Data":     df_f["dq_score_completeness"].mean(),
             "Format Accuracy":  df_f["dq_score_validity"].mean(),
@@ -1574,7 +1623,7 @@ if "scored_df" in st.session_state:
     # =========================================================================
     # TAB 4 — RECORD EXPLORER
     # =========================================================================
-    with tab4:
+    with tab5:
         score_cols_all = ["dq_score","dq_score_completeness","dq_score_validity",
                           "dq_score_accuracy","dq_score_consistency","dq_score_uniqueness"]
         id_cols_avail  = col_mapping.get("id_columns",[])[:2]
@@ -1600,7 +1649,7 @@ if "scored_df" in st.session_state:
     # =========================================================================
     # TAB 5 — DEEP DIVE
     # =========================================================================
-    with tab5:
+    with tab6:
         id_col = (col_mapping.get("id_columns") or list(df_f.columns))[0]
         if id_col in df_f.columns:
             options  = df_f[id_col].tolist()
@@ -1655,7 +1704,7 @@ if "scored_df" in st.session_state:
     # =========================================================================
     # TAB 6 — STATISTICS
     # =========================================================================
-    with tab6:
+    with tab7:
         st.subheader("Cleaning statistics")
         st.dataframe(pd.DataFrame([{"Metric":k,"Value":v} for k,v in clean_stats.items()]),
                      use_container_width=True, hide_index=True)
@@ -1677,7 +1726,7 @@ if "scored_df" in st.session_state:
     # =========================================================================
     # TAB 7 — EXPORT
     # =========================================================================
-    with tab7:
+    with tab8:
         st.subheader("⬇️ Download full scored dataset")
         st.caption(f"{len(df_f):,} records · all severity levels · includes all DQ columns")
         st.download_button(
@@ -1742,7 +1791,7 @@ if "scored_df" in st.session_state:
     # =========================================================================
     # TAB 8 — ANOMALY DETECTION  (v2.2 NEW)
     # =========================================================================
-    with tab8:
+    with tab9:
         has_iso = "isolation_score"   in df.columns
         has_iqr = "iqr_outlier_count" in df.columns
         has_flag= "is_anomaly"        in df.columns
@@ -1872,7 +1921,7 @@ if "scored_df" in st.session_state:
     # =========================================================================
     # TAB 9 — ASK YOUR DATA  (v2.4 NLQ)
     # =========================================================================
-    with tab9:
+    with tab2:
         st.markdown("""
         <div style="background:linear-gradient(135deg,#23022E 0%,#3D1040 100%);
                     border-radius:14px;padding:20px 28px;margin-bottom:20px;
@@ -1885,37 +1934,46 @@ if "scored_df" in st.session_state:
         </div>
         """, unsafe_allow_html=True)
 
-        # ── Search input ─────────────────────────────────────────────────────
-        nlq_col1, nlq_col2 = st.columns([6, 1])
-        with nlq_col1:
-            nlq_input = st.text_input(
-                "Your question",
-                key="nlq_main",
-                placeholder='e.g. "Show all critical records" · "Which vendors have the most issues?" · "Top 20 worst records"',
-                label_visibility="collapsed",
-            )
-        with nlq_col2:
-            nlq_run = st.button("🔍 Search", key="nlq_run", use_container_width=True, type="primary")
+        # ── State init ───────────────────────────────────────────────────────
+        # nlq_chip holds the last chip-click value (never conflicts with widget key)
+        if "nlq_chip" not in st.session_state:
+            st.session_state["nlq_chip"] = ""
 
-        # ── Example chips ────────────────────────────────────────────────────
-        st.markdown('<p style="color:#5E6472;font-size:11px;font-weight:700;letter-spacing:0.8px;text-transform:uppercase;margin:12px 0 6px;">Try these examples</p>', unsafe_allow_html=True)
+        # ── Example chips (rendered BEFORE the text input) ────────────────────
+        st.markdown('<p style="color:#5E6472;font-size:11px;font-weight:700;letter-spacing:0.8px;text-transform:uppercase;margin:0 0 8px;">Try these examples</p>', unsafe_allow_html=True)
         chip_rows = [NLQ_EXAMPLES[:4], NLQ_EXAMPLES[4:8], NLQ_EXAMPLES[8:]]
         for row in chip_rows:
             cols = st.columns(len(row))
             for i, example in enumerate(row):
                 with cols[i]:
                     if st.button(example, key=f"chip_{example}", use_container_width=True):
-                        st.session_state["nlq_main"] = example
-                        nlq_input = example
-                        nlq_run = True
+                        # Write to separate key — never the widget's own key
+                        st.session_state["nlq_chip"] = example
+
+        st.markdown("<br>", unsafe_allow_html=True)
+
+        # ── Search input ─────────────────────────────────────────────────────
+        # Populate from chip click if present, else keep blank
+        prefill = st.session_state.get("nlq_chip", "")
+        nlq_col1, nlq_col2 = st.columns([6, 1])
+        with nlq_col1:
+            nlq_input = st.text_input(
+                "Your question",
+                value=prefill,
+                placeholder='e.g. "Show all critical records" · "Which vendors have the most issues?" · "Top 20 worst records"',
+                label_visibility="collapsed",
+                key="nlq_typed",
+            )
+            # If user typed something new, clear the chip state so it doesn't override
+            if nlq_input != prefill:
+                st.session_state["nlq_chip"] = nlq_input
+        with nlq_col2:
+            nlq_run = st.button("🔍 Search", key="nlq_run", use_container_width=True, type="primary")
 
         st.divider()
 
         # ── Execute query ────────────────────────────────────────────────────
         active_query = nlq_input.strip() if nlq_input else ""
-        # Check if a chip was just clicked (session_state updated)
-        if not active_query and "nlq_main" in st.session_state:
-            active_query = st.session_state["nlq_main"].strip()
 
         if active_query:
             result = parse_nlq(active_query, df_f, col_mapping)
