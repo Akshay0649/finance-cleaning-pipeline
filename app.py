@@ -1,5 +1,5 @@
 """
-app.py — DataQual AI  v2.3
+app.py — DataQual AI  v2.4
 =============================================
 Universal AI-powered DQ platform.
 Works with ANY dataset — no domain selection needed.
@@ -17,6 +17,7 @@ Deploy:       push to GitHub → share.streamlit.io
 """
 
 import json
+import re
 import random
 from collections import Counter
 from datetime import date, datetime, timedelta
@@ -30,7 +31,7 @@ from sklearn.ensemble import IsolationForest
 
 # ── Page config ───────────────────────────────────────────────────────────────
 st.set_page_config(
-    page_title="DataQual AI — v2.3",
+    page_title="DataQual AI — v2.4",
     page_icon="🔬",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -125,6 +126,261 @@ def section_head(title, subtitle=""):
             sub + "</div>")
 
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# NATURAL LANGUAGE QUERY ENGINE  (v2.4)
+# ═══════════════════════════════════════════════════════════════════════════════
+import re as _re
+
+_STOPWORDS = {"show","me","find","get","list","give","display","all","the",
+              "records","rows","entries","data","where","which","that","with",
+              "have","has","are","is","a","an","of","in","for","and","or"}
+
+def _tokens(q: str) -> list[str]:
+    return [t for t in _re.sub(r"[^\w\s<>=!\.%]", " ", q.lower()).split()
+            if t not in _STOPWORDS]
+
+# ── Intent patterns ────────────────────────────────────────────────────────────
+_SEV_MAP = {
+    "critical":"CRITICAL","crit":"CRITICAL",
+    "high":"HIGH",
+    "medium":"MEDIUM","med":"MEDIUM","moderate":"MEDIUM",
+    "low":"LOW",
+    "clean":"CLEAN","good":"CLEAN","healthy":"CLEAN","ok":"CLEAN",
+}
+_GRADE_MAP = {"a":"A","b":"B","c":"C","d":"D","f":"F"}
+_DIM_MAP = {
+    "completeness":"dq_score_completeness","missing":"dq_score_completeness","null":"dq_score_completeness","empty":"dq_score_completeness",
+    "validity":"dq_score_validity","format":"dq_score_validity","invalid":"dq_score_validity",
+    "accuracy":"dq_score_accuracy","value":"dq_score_accuracy","range":"dq_score_accuracy",
+    "consistency":"dq_score_consistency","consistent":"dq_score_consistency",
+    "uniqueness":"dq_score_uniqueness","duplicate":"dq_score_uniqueness","duplication":"dq_score_uniqueness","duplicates":"dq_score_uniqueness",
+}
+_DIM_HUMAN = {
+    "dq_score_completeness":"Missing Data",
+    "dq_score_validity":"Format Accuracy",
+    "dq_score_accuracy":"Value Accuracy",
+    "dq_score_consistency":"Data Consistency",
+    "dq_score_uniqueness":"Duplicate Check",
+}
+
+def _parse_number(tokens: list[str]) -> float | None:
+    for t in tokens:
+        try: return float(t.replace("%","").replace(",",""))
+        except ValueError: pass
+    return None
+
+def parse_nlq(query: str, df: "pd.DataFrame", col_mapping: dict) -> dict:
+    """
+    Parse a natural-language query and return:
+      {"mask": pd.Series(bool), "summary": str, "intent": str,
+       "sort_col": str|None, "sort_asc": bool, "agg_df": pd.DataFrame|None}
+    Returns None mask means 'return all'.
+    """
+    import pandas as pd, numpy as np
+    q    = query.strip().lower()
+    toks = _tokens(q)
+
+    mask   = pd.Series([True]*len(df), index=df.index)
+    intent = "filter"
+    summary_parts = []
+    sort_col  = None
+    sort_asc  = False
+    agg_df    = None
+    limit     = None
+
+    num_cols = col_mapping.get("numeric_columns", [])
+    cat_cols = col_mapping.get("categorical_columns", [])
+    id_cols  = col_mapping.get("id_columns", [])
+
+    # ── 1. Severity filter ────────────────────────────────────────────────────
+    sev_hits = [_SEV_MAP[t] for t in toks if t in _SEV_MAP]
+    if sev_hits and "dq_severity" in df.columns:
+        mask &= df["dq_severity"].isin(sev_hits)
+        summary_parts.append(f"severity = {' or '.join(sev_hits)}")
+
+    # ── 2. Grade filter ───────────────────────────────────────────────────────
+    grade_m = _re.search(r'\bgrade\s+([a-fA-F])\b', q)
+    if grade_m and "dq_grade" in df.columns:
+        g = grade_m.group(1).upper()
+        mask &= df["dq_grade"] == g
+        summary_parts.append(f"grade = {g}")
+
+    # ── 3. DQ score threshold ─────────────────────────────────────────────────
+    score_m = _re.search(r'score\s*(below|under|less than|<|above|over|greater than|>|between)\s*([\d\.]+)(?:\s*and\s*([\d\.]+))?', q)
+    if score_m and "dq_score" in df.columns:
+        op, v1, v2 = score_m.group(1), float(score_m.group(2)), score_m.group(3)
+        if op in ("below","under","less than","<"):
+            mask &= df["dq_score"] < v1
+            summary_parts.append(f"DQ score < {v1:.0f}")
+        elif op in ("above","over","greater than",">"):
+            mask &= df["dq_score"] > v1
+            summary_parts.append(f"DQ score > {v1:.0f}")
+        elif op == "between" and v2:
+            mask &= df["dq_score"].between(v1, float(v2))
+            summary_parts.append(f"DQ score between {v1:.0f}–{float(v2):.0f}")
+
+    # ── 4. Anomaly / unusual filter ───────────────────────────────────────────
+    anom_words = {"unusual","anomal","anomaly","anomalous","outlier","outliers","flagged","suspicious","weird","strange","risky","risk"}
+    if any(w in q for w in anom_words):
+        if "is_anomaly" in df.columns:
+            mask &= df["is_anomaly"] == True
+            summary_parts.append("flagged as anomalous by AI")
+        elif "isolation_score" in df.columns:
+            mask &= df["isolation_score"] >= 70
+            summary_parts.append("AI risk score ≥ 70")
+
+    # ── 5. Duplicate records ──────────────────────────────────────────────────
+    dup_words = {"duplicate","duplicates","duplicated","dup","dups","repeated"}
+    if any(w in q for w in dup_words):
+        dup_col = next((c for c in id_cols if c in df.columns), None)
+        if dup_col:
+            dupes = df[dup_col].duplicated(keep=False)
+            mask &= dupes
+            summary_parts.append(f"duplicate {dup_col}")
+        elif "dq_score_uniqueness" in df.columns:
+            mask &= df["dq_score_uniqueness"] < 50
+            summary_parts.append("uniqueness score < 50")
+
+    # ── 6. Missing / null values ──────────────────────────────────────────────
+    miss_words = {"missing","null","nulls","empty","blank","nan","incomplete"}
+    if any(w in q for w in miss_words) and not any(w in q for w in ("completeness","score")):
+        null_mask = df.isnull().any(axis=1)
+        mask &= null_mask
+        summary_parts.append("has missing values")
+
+    # ── 7. Dimension weakness filter ─────────────────────────────────────────
+    dim_hits = [(k, _DIM_MAP[k]) for k in _DIM_MAP if k in q]
+    if dim_hits:
+        thresh_m = _re.search(r'(below|under|<|less than)\s*([\d\.]+)', q)
+        thresh = float(thresh_m.group(2)) if thresh_m else 70.0
+        for kw, col in dim_hits:
+            if col in df.columns:
+                mask &= df[col] < thresh
+                summary_parts.append(f"{_DIM_HUMAN[col]} score < {thresh:.0f}")
+
+    # ── 8. Numeric column value filter  (amount > 50000, price < 100) ─────────
+    num_m = _re.search(
+        r'([\w_]+)\s*(>|>=|<|<=|=|==|above|below|over|under|greater than|less than)\s*([\d,\.]+)', q)
+    if num_m:
+        col_hint = num_m.group(1).replace(" ","_")
+        op_str   = num_m.group(2)
+        val      = float(num_m.group(3).replace(",",""))
+        # fuzzy-match col_hint to actual df columns
+        matched_col = next(
+            (c for c in df.columns if col_hint in c.lower() or c.lower() in col_hint), None)
+        if matched_col and pd.api.types.is_numeric_dtype(df[matched_col]):
+            op_map = {">":">",">=":">=","<":"<","<=":"<=","=":"==","==":"==",
+                      "above":">","over":">","greater than":">",
+                      "below":"<","under":"<","less than":"<"}
+            op = op_map.get(op_str, ">")
+            cond = df[matched_col].dropna()
+            if op == ">":   mask &= df[matched_col].fillna(-np.inf) > val
+            elif op == ">=": mask &= df[matched_col].fillna(-np.inf) >= val
+            elif op == "<":  mask &= df[matched_col].fillna(np.inf) < val
+            elif op == "<=": mask &= df[matched_col].fillna(np.inf) <= val
+            elif op == "==": mask &= df[matched_col] == val
+            summary_parts.append(f"{matched_col} {op} {val:,.0f}")
+
+    # ── 9. Categorical value filter  (vendor = 'Accenture', status = paid) ───
+    cat_m = _re.search(r'([\w_]+)\s*(?:=|is|equals|called|named)\s*["\']?([\w\s]+)["\']?', q)
+    if cat_m:
+        col_hint = cat_m.group(1).replace(" ","_")
+        val_hint = cat_m.group(2).strip()
+        matched_col = next(
+            (c for c in df.columns if col_hint in c.lower() or c.lower() in col_hint), None)
+        if matched_col and matched_col not in ("dq_severity","dq_grade","is_anomaly"):
+            col_vals = df[matched_col].astype(str).str.lower()
+            hit = col_vals.str.contains(val_hint, na=False)
+            if hit.sum() > 0:
+                mask &= hit
+                summary_parts.append(f"{matched_col} contains '{val_hint}'")
+
+    # ── 10. Aggregation: which column has most issues ──────────────────────────
+    agg_words = {"which","who","top","worst","best","most","fewest","rank","breakdown","by","group"}
+    if any(w in toks for w in agg_words):
+        grp_col = next((c for c in cat_cols if c in df.columns and
+                        any(hint in q for hint in [c.lower(), c.split("_")[0].lower()])), None)
+        if not grp_col and cat_cols:
+            # default: first categorical column
+            grp_col = next((c for c in cat_cols if c in df.columns), None)
+        if grp_col:
+            intent = "aggregate"
+            agg_df = (
+                df[mask].groupby(grp_col, dropna=False)
+                .agg(
+                    records=("dq_score","count"),
+                    avg_score=("dq_score","mean"),
+                    critical=(
+                        "dq_severity",
+                        lambda s: (s == "CRITICAL").sum()
+                    ),
+                )
+                .reset_index()
+                .rename(columns={grp_col: "Value", "records":"Records",
+                                  "avg_score":"Avg DQ Score","critical":"Critical Issues"})
+                .sort_values("Avg DQ Score")
+            )
+            agg_df["Avg DQ Score"] = agg_df["Avg DQ Score"].round(1)
+            summary_parts.append(f"grouped by {grp_col}")
+
+    # ── 11. Top N ─────────────────────────────────────────────────────────────
+    top_m = _re.search(r'top\s+(\d+)', q)
+    if top_m:
+        limit = int(top_m.group(1))
+        sort_col = "dq_score"
+        sort_asc = True
+
+    # ── 12. Sort direction hints ──────────────────────────────────────────────
+    if any(w in q for w in ("worst","lowest","lowest score","bad")):
+        sort_col = sort_col or "dq_score"; sort_asc = True
+    if any(w in q for w in ("best","highest","highest score")):
+        sort_col = sort_col or "dq_score"; sort_asc = False
+    if "risk" in q or "risky" in q:
+        if "isolation_score" in df.columns:
+            sort_col = "isolation_score"; sort_asc = False
+
+    # ── Build final summary ───────────────────────────────────────────────────
+    n = int(mask.sum())
+    if not summary_parts:
+        if n == len(df):
+            summary_txt = f"Showing all {len(df):,} records — try a more specific query."
+        else:
+            summary_txt = f"Found {n:,} records."
+    else:
+        criteria = " · ".join(summary_parts)
+        summary_txt = f"Found **{n:,} records** matching: {criteria}."
+
+    if limit:
+        summary_txt += f" Showing top {limit}."
+
+    return {
+        "mask":     mask,
+        "summary":  summary_txt,
+        "intent":   intent,
+        "sort_col": sort_col,
+        "sort_asc": sort_asc,
+        "agg_df":   agg_df,
+        "limit":    limit,
+        "n":        n,
+    }
+
+# Suggested example queries for the UI
+NLQ_EXAMPLES = [
+    "Show critical records",
+    "Find anomalous records",
+    "Records with score below 60",
+    "Top 20 worst records",
+    "Show records with missing values",
+    "Find duplicate records",
+    "High severity with low completeness",
+    "Which vendors have the most issues",
+    "Show high risk anomalies",
+    "Records with format accuracy below 50",
+    "Grade F records",
+    "Show flagged records sorted by risk",
+]
+
+
 # ── Column-type metadata ──────────────────────────────────────────────────────
 COL_TYPE_META = {
     "numeric":     {"icon": "🔢", "label": "Numeric",     "color": "#378ADD"},
@@ -185,7 +441,7 @@ with st.sidebar:
     dup_cols      = st.text_input("Duplicate key columns (;-separated, blank = all)", "")
 
     st.divider()
-    st.caption("Built by Akshay — Data Engineer · v2.3")
+    st.caption("Built by Akshay — Data Engineer · v2.4")
 
 CONFIG = {
     "null_fill_string":         null_fill_str,
@@ -666,7 +922,7 @@ st.markdown("""
     <div style="text-align:right;flex-shrink:0;">
       <span style="background:#915466;color:#FDFFFF;font-size:11px;font-weight:700;
                    padding:6px 14px;border-radius:20px;letter-spacing:0.8px;
-                   border:1.5px solid #C79192;">v2.3</span>
+                   border:1.5px solid #C79192;">v2.4</span>
       <p style="color:#C79192;font-size:10px;margin:6px 0 0;letter-spacing:0.5px;text-transform:uppercase;">Universal DQ Platform</p>
     </div>
   </div>
@@ -970,7 +1226,7 @@ if "scored_df" in st.session_state:
         df["dq_score"].between(score_range[0], score_range[1])
     ].copy()
 
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs([
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9 = st.tabs([
         "🔍 Profile",
         "📊 Dashboard",
         "📐 Dimension Analysis",
@@ -979,6 +1235,7 @@ if "scored_df" in st.session_state:
         "📈 Statistics",
         "⬇️ Export",
         "🚨 Risk Signals",
+        "💬 Ask Your Data",
     ])
 
     # =========================================================================
@@ -1067,6 +1324,34 @@ if "scored_df" in st.session_state:
         banner_html = build_story_banner(df_f, col_mapping)
         if banner_html:
             st.markdown(banner_html, unsafe_allow_html=True)
+        # ── Quick NLQ search bar (Dashboard) ─────────────────────────────────
+        with st.expander("💬 Ask your data — type a question to filter records instantly", expanded=False):
+            qs_col1, qs_col2 = st.columns([5, 1])
+            with qs_col1:
+                quick_q = st.text_input(
+                    "Quick query", key="dash_nlq",
+                    placeholder='e.g. "Show critical records" · "amount above 50000" · "Find anomalies"',
+                    label_visibility="collapsed",
+                )
+            with qs_col2:
+                qs_clear = st.button("✕ Clear", key="dash_nlq_clear", use_container_width=True)
+            if qs_clear:
+                st.session_state["dash_nlq"] = ""
+                quick_q = ""
+            if quick_q and quick_q.strip():
+                qs_result = parse_nlq(quick_q, df_f, col_mapping)
+                st.caption(qs_result["summary"])
+                if qs_result["intent"] == "aggregate" and qs_result["agg_df"] is not None:
+                    st.dataframe(qs_result["agg_df"], use_container_width=True, hide_index=True)
+                else:
+                    qs_df = df_f[qs_result["mask"]]
+                    if qs_result["sort_col"] and qs_result["sort_col"] in qs_df.columns:
+                        qs_df = qs_df.sort_values(qs_result["sort_col"], ascending=qs_result["sort_asc"])
+                    if qs_result["limit"]:
+                        qs_df = qs_df.head(qs_result["limit"])
+                    st.dataframe(qs_df.reset_index(drop=True), use_container_width=True, height=300)
+
+
 
         lowest_dim = min(
             [("Missing Data",     df_f["dq_score_completeness"].mean()),
@@ -1584,6 +1869,186 @@ if "scored_df" in st.session_state:
                 use_container_width=True,
             )
 
+    # =========================================================================
+    # TAB 9 — ASK YOUR DATA  (v2.4 NLQ)
+    # =========================================================================
+    with tab9:
+        st.markdown("""
+        <div style="background:linear-gradient(135deg,#23022E 0%,#3D1040 100%);
+                    border-radius:14px;padding:20px 28px;margin-bottom:20px;
+                    border:1px solid #915466;">
+          <h2 style="color:#FDFFFF;margin:0 0 6px;font-size:20px;font-weight:800;">💬 Ask Your Data</h2>
+          <p style="color:#C79192;margin:0;font-size:13px;line-height:1.6;">
+            Type a plain-English question — no SQL, no filters, no code.
+            The AI reads your intent and returns matching records instantly.
+          </p>
+        </div>
+        """, unsafe_allow_html=True)
+
+        # ── Search input ─────────────────────────────────────────────────────
+        nlq_col1, nlq_col2 = st.columns([6, 1])
+        with nlq_col1:
+            nlq_input = st.text_input(
+                "Your question",
+                key="nlq_main",
+                placeholder='e.g. "Show all critical records" · "Which vendors have the most issues?" · "Top 20 worst records"',
+                label_visibility="collapsed",
+            )
+        with nlq_col2:
+            nlq_run = st.button("🔍 Search", key="nlq_run", use_container_width=True, type="primary")
+
+        # ── Example chips ────────────────────────────────────────────────────
+        st.markdown('<p style="color:#5E6472;font-size:11px;font-weight:700;letter-spacing:0.8px;text-transform:uppercase;margin:12px 0 6px;">Try these examples</p>', unsafe_allow_html=True)
+        chip_rows = [NLQ_EXAMPLES[:4], NLQ_EXAMPLES[4:8], NLQ_EXAMPLES[8:]]
+        for row in chip_rows:
+            cols = st.columns(len(row))
+            for i, example in enumerate(row):
+                with cols[i]:
+                    if st.button(example, key=f"chip_{example}", use_container_width=True):
+                        st.session_state["nlq_main"] = example
+                        nlq_input = example
+                        nlq_run = True
+
+        st.divider()
+
+        # ── Execute query ────────────────────────────────────────────────────
+        active_query = nlq_input.strip() if nlq_input else ""
+        # Check if a chip was just clicked (session_state updated)
+        if not active_query and "nlq_main" in st.session_state:
+            active_query = st.session_state["nlq_main"].strip()
+
+        if active_query:
+            result = parse_nlq(active_query, df_f, col_mapping)
+            n_found = result["n"]
+
+            # ── Result summary banner ────────────────────────────────────────
+            if n_found == 0:
+                st.warning(f'🔍 No records matched **"{active_query}"** — try different keywords or check the example queries above.')
+            else:
+                color = "#1D9E75" if n_found > 10 else "#BA7517"
+                st.markdown(
+                    f'<div style="background:#f0fdf4;border-left:4px solid {color};'
+                    f'border-radius:10px;padding:14px 18px;margin-bottom:16px;">'
+                    f'<p style="margin:0;color:#23022E;font-size:14px;">{result["summary"]}</p>'
+                    f'</div>',
+                    unsafe_allow_html=True,
+                )
+
+                # ── Aggregate view ────────────────────────────────────────────
+                if result["intent"] == "aggregate" and result["agg_df"] is not None:
+                    agg = result["agg_df"]
+                    st.subheader("📊 Breakdown")
+
+                    # Bar chart
+                    fig_agg = px.bar(
+                        agg.head(20), x="Value", y="Avg DQ Score",
+                        color="Avg DQ Score",
+                        color_continuous_scale=["#E24B4A","#EF9F27","#1D9E75"],
+                        range_color=[0, 100],
+                        text="Avg DQ Score",
+                        labels={"Value": "", "Avg DQ Score": "Avg Quality Score"},
+                    )
+                    fig_agg.update_traces(texttemplate="%{text:.1f}", textposition="outside")
+                    fig_agg.update_layout(
+                        **_chart_layout(height=380),
+                        xaxis=dict(**_GRID_X, title=""),
+                        yaxis=dict(**_GRID_Y, title="Avg Quality Score", range=[0, 110]),
+                        coloraxis_showscale=False,
+                    )
+                    st.plotly_chart(fig_agg, use_container_width=True)
+
+                    st.subheader("📋 Full Breakdown Table")
+                    agg_disp = agg.copy()
+                    agg_disp["Avg DQ Score"] = agg_disp["Avg DQ Score"].round(1)
+                    st.dataframe(
+                        agg_disp.reset_index(drop=True),
+                        use_container_width=True,
+                        hide_index=True,
+                        column_config={
+                            "Avg DQ Score": st.column_config.ProgressColumn(
+                                "Avg Quality Score", min_value=0, max_value=100, format="%.1f"
+                            ),
+                            "Critical Issues": st.column_config.NumberColumn(
+                                "🔴 Critical", format="%d"
+                            ),
+                        },
+                    )
+
+                # ── Record filter view ────────────────────────────────────────
+                else:
+                    res_df = df_f[result["mask"]].copy()
+                    if result["sort_col"] and result["sort_col"] in res_df.columns:
+                        res_df = res_df.sort_values(result["sort_col"], ascending=result["sort_asc"])
+                    if result["limit"]:
+                        res_df = res_df.head(result["limit"])
+
+                    # ── KPI strip ─────────────────────────────────────────────
+                    k1, k2, k3, k4 = st.columns(4)
+                    avg_q = res_df["dq_score"].mean() if len(res_df) else 0
+                    crit_n = int((res_df["dq_severity"] == "CRITICAL").sum()) if "dq_severity" in res_df.columns else 0
+                    anom_n = int(res_df["is_anomaly"].sum()) if "is_anomaly" in res_df.columns else 0
+                    k1.metric("Records Found", f"{len(res_df):,}")
+                    k2.metric("Avg Quality Score", f"{avg_q:.1f}")
+                    k3.metric("Critical Issues", f"{crit_n:,}")
+                    k4.metric("Anomalies", f"{anom_n:,}")
+
+                    st.markdown("<br>", unsafe_allow_html=True)
+
+                    # ── Smart column selection ────────────────────────────────
+                    priority_cols = (
+                        col_mapping.get("id_columns", [])[:2] +
+                        col_mapping.get("date_columns", [])[:1] +
+                        col_mapping.get("numeric_columns", [])[:3] +
+                        col_mapping.get("categorical_columns", [])[:2]
+                    )
+                    score_cols = ["dq_score", "dq_severity", "dq_grade"]
+                    anom_cols  = [c for c in ["isolation_score", "is_anomaly"] if c in res_df.columns]
+                    show_cols  = [c for c in (priority_cols + score_cols + anom_cols) if c in res_df.columns]
+                    if not show_cols:
+                        show_cols = list(res_df.columns[:12])
+
+                    col_cfg = {}
+                    if "dq_score" in show_cols:
+                        col_cfg["dq_score"] = st.column_config.ProgressColumn(
+                            "Quality Score", min_value=0, max_value=100, format="%d")
+                    if "isolation_score" in show_cols:
+                        col_cfg["isolation_score"] = st.column_config.ProgressColumn(
+                            "AI Risk Score", min_value=0, max_value=100, format="%d")
+
+                    st.dataframe(
+                        res_df[show_cols].reset_index(drop=True),
+                        use_container_width=True,
+                        height=460,
+                        column_config=col_cfg,
+                    )
+
+                    # ── Download ──────────────────────────────────────────────
+                    dl1, dl2 = st.columns([3, 1])
+                    with dl1:
+                        st.download_button(
+                            label=f"⬇️ Download these {len(res_df):,} records as CSV",
+                            data=res_df.to_csv(index=False).encode("utf-8"),
+                            file_name=f"nlq_results_{len(res_df)}rows.csv",
+                            mime="text/csv",
+                            use_container_width=True,
+                        )
+                    with dl2:
+                        st.caption(f"{len(res_df):,} of {len(df_f):,} total records")
+
+        else:
+            # ── Empty state ───────────────────────────────────────────────────
+            st.markdown("""
+            <div style="text-align:center;padding:48px 24px;color:#5E6472;">
+              <p style="font-size:48px;margin:0 0 12px;">💬</p>
+              <p style="font-size:16px;font-weight:700;color:#23022E;margin:0 0 8px;">Ask anything about your data</p>
+              <p style="font-size:13px;margin:0;line-height:1.7;">
+                Type a question above or click an example chip to get started.<br>
+                No SQL. No filters. Just plain English.
+              </p>
+            </div>
+            """, unsafe_allow_html=True)
+
+
 # ── Footer ────────────────────────────────────────────────────────────────────
 st.divider()
-st.caption("DataQual AI · Universal Data Quality Platform · v2.3 · Built by Akshay")
+st.caption("DataQual AI · Universal Data Quality Platform · v2.4 · Built by Akshay")
