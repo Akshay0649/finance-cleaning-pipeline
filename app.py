@@ -261,15 +261,24 @@ def parse_nlq(query: str, df: "pd.DataFrame", col_mapping: dict) -> dict:
     # ── 8. Numeric column value filter  (amount > 50000, price < 100) ─────────
     # Expanded regex: captures "higher than", "more than", "lower than" etc.
     num_m = _re.search(
-        r'([\w_]+(?:\s+[\w_]+)?)\s*(>=|<=|>|<|=|==|above|below|over|under|'
+        r'([\w_]+(?:\s+[\w_]+){0,3})\s*(?:is\s+|are\s+|was\s+)?(>=|<=|>|<|=|==|above|below|over|under|'
         r'higher than|lower than|more than|less than|greater than|'
         r'bigger than|smaller than|exceeds|exceed)\s*([\d,\.]+)', q)
     if num_m:
-        col_hint    = num_m.group(1).strip().replace(" ","_")
+        # Strip any leading stopwords the greedy regex may have consumed
+        # e.g. "where session duration sec" → "session_duration_sec"
+        _raw_hint = num_m.group(1).strip().split()
+        while _raw_hint and _raw_hint[0].lower() in _STOPWORDS:
+            _raw_hint.pop(0)
+        col_hint = "_".join(_raw_hint)
         op_str      = num_m.group(2).strip()
         val         = float(num_m.group(3).replace(",",""))
+        # Match col_hint against actual column names — try substring both ways
         matched_col = next(
-            (c for c in df.columns if col_hint in c.lower() or c.lower() in col_hint), None)
+            (c for c in df.columns
+             if col_hint and (col_hint in c.lower() or c.lower() in col_hint
+                              or col_hint.replace("_"," ") in c.lower().replace("_"," "))),
+            None)
         if matched_col and pd.api.types.is_numeric_dtype(df[matched_col]):
             op_map = {
                 ">":">",">=":">=","<":"<","<=":"<=","=":"==","==":"==",
@@ -306,7 +315,12 @@ def parse_nlq(query: str, df: "pd.DataFrame", col_mapping: dict) -> dict:
     _FREQ_AGG_PHRASES = {"most used","most common","most popular","most frequent",
                          "highest used","most occurrences","used most","commonly used"}
     # Check raw query q (not toks) — "which/who" are stripped by _STOPWORDS
-    agg_phrase   = any(w in q.split() for w in AGG_TRIGGERS) or any(p in q for p in _FREQ_AGG_PHRASES)
+    # IMPORTANT: freq phrases ("highest used" etc.) must NOT steal "Top N entity" queries —
+    # those belong to block 11 which handles them with correct count-sort logic
+    _has_top_n   = bool(_re.search(r'top\s+\d+', q))
+    agg_phrase   = any(w in q.split() for w in AGG_TRIGGERS) or (
+        any(p in q for p in _FREQ_AGG_PHRASES) and not _has_top_n
+    )
     # Also catch "by <col>" pattern explicitly
     by_m = _re.search(r'\bby\s+([\w_]+)', q)
     if agg_phrase or (by_m and not _re.search(r'top\s+\d+', q)):
